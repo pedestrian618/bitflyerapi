@@ -1,1 +1,1 @@
-from .bitflyerapi import BitflyerAPI
+from .bitflyerapi import bitFlyerAPI

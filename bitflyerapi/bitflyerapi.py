@@ -8,14 +8,17 @@ import urllib
 
 import requests
 
-from . import AuthException
+from .exception import AuthException
 
-class BitflyerAPI(object):
+class bitFlyerAPI(object):
 	def __init__(self, *args, **config):
 		self.key = config["key"]
 		self.secret	= config["secret"]
-		self.timeout = (float(config["connect_timeout"]),
-						float(config["read_timeout"]))
+		try:
+			self.timeout = (float(config["connect_timeout"]),
+							float(config["read_timeout"]))
+		except:
+			self.timeout = 3.5
 		self.top = 'https://api.bitflyer.com'
 		self.public = '/v1/'
 		self.private = '/v1/me/'
@@ -42,13 +45,12 @@ class BitflyerAPI(object):
 							str.encode(text),
 							hashlib.sha256).hexdigest()
 
-		header = {
+		self.header = {
 			"ACCESS-KEY": self.key,
 			"ACCESS-TIMESTAMP": timestamp,
 			"ACCESS-SIGN": signature,
 			"Content-Type": "application/json"
 		}
-		self.header = header
 
 	def request(self,path,method='GET',params=None):
 		url = self.top + path
