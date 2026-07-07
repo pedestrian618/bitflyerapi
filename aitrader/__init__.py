@@ -7,6 +7,7 @@
 
 from .config import Config
 from .council import Council, CouncilDecision
+from .history import HistoryStore
 from .market import MarketSnapshot, fetch_market_snapshot
 from .personas import PERSONAS, Persona
 from .trader import Trader
@@ -15,6 +16,7 @@ __all__ = [
     "Config",
     "Council",
     "CouncilDecision",
+    "HistoryStore",
     "MarketSnapshot",
     "fetch_market_snapshot",
     "PERSONAS",

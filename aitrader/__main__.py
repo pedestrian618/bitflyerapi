@@ -12,6 +12,7 @@ import logging
 from .bot import run_loop, run_once
 from .config import Config
 from .council import Council
+from .history import HistoryStore
 from .trader import Trader
 
 
@@ -34,7 +35,11 @@ def main():
             min_score_ratio=config.min_score_ratio,
         )
         trader = Trader(config)
-        run_once(config, council, trader)
+        store = HistoryStore(config.history_path)
+        try:
+            run_once(config, council, trader, store=store)
+        finally:
+            store.close()
     else:
         run_loop()
 

@@ -17,8 +17,12 @@ $ pip install git+https://github.com/pedestrian618/bitflyerapi
 ### 仕組み
 
 ```
-bitFlyer公開API ──▶ 相場スナップショット(1分足・SMA・RSI・板状態など)
-                          │
+bitFlyer公開API ──▶ 相場スナップショット
+                     ├ 短期: 1分足・直近30分(SMA/RSI/騰落率)
+                     └ 中期: 1時間足・最大72時間(ローカル蓄積から構築)
+                          │              ▲
+                          │   SQLiteに1分足を毎サイクル蓄積
+                          │   (aitrader_history.db、数日で中期データが育つ)
                           ▼
             ┌──────── AI協議会(並列で意見聴取) ────────┐
             │ 慎重派リスク管理者・堅田   (重み1.5)      │
@@ -58,8 +62,14 @@ export AITRADER_DRY_RUN=0
 
 ```bash
 python -m aitrader --once   # 1サイクルだけ実行(動作確認向け)
-python -m aitrader          # ループ実行(デフォルト15分間隔)
+python -m aitrader          # ループ実行(デフォルト1時間間隔)
 ```
+
+**中期データについて**: bitFlyerの公開APIはローソク足を提供しないため、
+サイクルごとに取得した1分足を `aitrader_history.db`(SQLite)に蓄積し、
+そこから1時間足(最大72本)を構築してペルソナに渡します。
+起動直後は中期データが不完全な旨がプロンプトに明記され、
+ペルソナは確信度を落として判断します。**2〜3日回すと中期指標が育ちます。**
 
 ### 主な環境変数
 
@@ -71,8 +81,9 @@ python -m aitrader          # ループ実行(デフォルト15分間隔)
 | `AITRADER_ORDER_SIZE_BTC` | `0.001` | 1回の注文量(BTC) |
 | `AITRADER_MAX_POSITION_BTC` | `0.01` | 最大保有量(BTC) |
 | `AITRADER_MIN_JPY_BALANCE` | `10000` | BUYに必要な最低JPY残高 |
-| `AITRADER_INTERVAL_SEC` | `900` | 判定サイクル間隔(秒) |
+| `AITRADER_INTERVAL_SEC` | `3600` | 判定サイクル間隔(秒) |
 | `AITRADER_COOLDOWN_SEC` | `1800` | 連続発注を防ぐクールダウン(秒) |
+| `AITRADER_HISTORY_PATH` | `aitrader_history.db` | 1分足を蓄積するSQLiteのパス |
 | `AITRADER_MIN_AGREE_VOTES` | `3` | 合意に必要な賛成人数 |
 | `AITRADER_MIN_SCORE_RATIO` | `0.55` | 合意に必要なスコア比 |
 

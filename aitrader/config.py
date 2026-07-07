@@ -36,8 +36,11 @@ class Config:
     order_size_btc: float = field(default_factory=lambda: float(os.environ.get("AITRADER_ORDER_SIZE_BTC", "0.001")))
     max_position_btc: float = field(default_factory=lambda: float(os.environ.get("AITRADER_MAX_POSITION_BTC", "0.01")))
     min_jpy_balance: float = field(default_factory=lambda: float(os.environ.get("AITRADER_MIN_JPY_BALANCE", "10000")))
-    interval_sec: int = field(default_factory=lambda: int(os.environ.get("AITRADER_INTERVAL_SEC", "900")))
+    interval_sec: int = field(default_factory=lambda: int(os.environ.get("AITRADER_INTERVAL_SEC", "3600")))
     trade_cooldown_sec: int = field(default_factory=lambda: int(os.environ.get("AITRADER_COOLDOWN_SEC", "1800")))
+
+    # 履歴蓄積(1分足をSQLiteに貯めて中期指標を育てる)
+    history_path: str = field(default_factory=lambda: os.environ.get("AITRADER_HISTORY_PATH", "aitrader_history.db"))
 
     # 協議会の合意条件
     min_agree_votes: int = field(default_factory=lambda: int(os.environ.get("AITRADER_MIN_AGREE_VOTES", "3")))
