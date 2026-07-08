@@ -8,6 +8,7 @@
 from .config import Config
 from .council import Council, CouncilDecision
 from .history import HistoryStore
+from .llm import LLMError, LLMRouter, PersonaVote
 from .market import MarketSnapshot, fetch_market_snapshot
 from .personas import PERSONAS, Persona
 from .trader import Trader
@@ -17,6 +18,9 @@ __all__ = [
     "Council",
     "CouncilDecision",
     "HistoryStore",
+    "LLMError",
+    "LLMRouter",
+    "PersonaVote",
     "MarketSnapshot",
     "fetch_market_snapshot",
     "PERSONAS",

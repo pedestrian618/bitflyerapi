@@ -29,11 +29,7 @@ def main():
         )
         config = Config()
         config.validate_for_trading()
-        council = Council(
-            model=config.model,
-            min_agree_votes=config.min_agree_votes,
-            min_score_ratio=config.min_score_ratio,
-        )
+        council = Council(config)
         trader = Trader(config)
         store = HistoryStore(config.history_path)
         try:

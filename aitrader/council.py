@@ -1,33 +1,29 @@
 # -*- coding: utf-8 -*-
-"""AI協議会。各ペルソナにClaude APIで意見を聞き、重み付き投票で結論を出す。"""
+"""AI協議会。各ペルソナにLLMで意見を聞き、重み付き投票で結論を出す。
+
+ペルソナごとに担当プロバイダ(Claude / OpenAI / Gemini)とモデルティア
+(heavy/light)が割り当てられ、障害時はLLMRouterが自動フェイルオーバーする。
+"""
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
 
-import anthropic
-from pydantic import BaseModel, Field
-
+from .config import Config
+from .llm import Decision, LLMRouter, PersonaVote
 from .market import MarketSnapshot
 from .personas import PERSONAS, Persona
 
 logger = logging.getLogger(__name__)
 
-Decision = Literal["BUY", "SELL", "HOLD"]
-
-
-class PersonaVote(BaseModel):
-    """1ペルソナの投票(Claudeの構造化出力)。"""
-    decision: Decision = Field(description="BUY / SELL / HOLD のいずれか")
-    confidence: float = Field(description="判断への確信度 (0.0〜1.0)")
-    reasoning: str = Field(description="判断根拠(日本語で2〜3文)")
+__all__ = ["Council", "CouncilDecision", "PersonaVote", "VoteRecord"]
 
 
 @dataclass
 class VoteRecord:
     persona: Persona
     vote: PersonaVote
+    served_by: str = ""   # 実際に応答した "プロバイダ:モデル"
 
     @property
     def score(self) -> float:
@@ -48,8 +44,9 @@ class CouncilDecision:
             f"(スコア比 {self.score_ratio:.0%} / 賛成 {self.agree_votes}名) ==="
         ]
         for r in self.votes:
+            served = f" [{r.served_by}]" if r.served_by else ""
             lines.append(
-                f"[{r.persona.name}] {r.vote.decision} "
+                f"[{r.persona.name}]{served} {r.vote.decision} "
                 f"(確信度 {r.vote.confidence:.2f} × 重み {r.persona.weight} = {r.score:.2f})\n"
                 f"  → {r.vote.reasoning}"
             )
@@ -57,34 +54,33 @@ class CouncilDecision:
 
 
 class Council:
-    def __init__(self, model: str = "claude-opus-4-8",
-                 personas: list = None,
-                 min_agree_votes: int = 3,
-                 min_score_ratio: float = 0.55):
-        self.client = anthropic.Anthropic()
-        self.model = model
+    def __init__(self, config: Config = None, personas: list = None):
+        self.config = config or Config()
+        self.router = LLMRouter(
+            models=self.config.llm_models(),
+            cooldown_sec=self.config.llm_cooldown_sec,
+        )
         self.personas = personas if personas is not None else PERSONAS
-        self.min_agree_votes = min_agree_votes
-        self.min_score_ratio = min_score_ratio
+        self.min_agree_votes = self.config.min_agree_votes
+        self.min_score_ratio = self.config.min_score_ratio
+
+        configured = self.router.configured_providers()
+        logger.info("利用可能なLLMプロバイダ: %s", ", ".join(configured) or "なし")
 
     def _ask_persona(self, persona: Persona, market_text: str) -> VoteRecord:
-        response = self.client.messages.parse(
-            model=self.model,
-            max_tokens=2048,
+        vote, served_by = self.router.ask(
+            preferred=persona.provider,
+            tier=persona.tier,
             system=persona.system_prompt,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "以下の相場データを分析し、あなたの投資哲学に基づいて"
-                    "売買判断を出してください。\n\n" + market_text
-                ),
-            }],
-            output_format=PersonaVote,
+            user=(
+                "以下の相場データを分析し、あなたの投資哲学に基づいて"
+                "売買判断を出してください。\n\n" + market_text
+            ),
         )
-        vote = response.parsed_output
-        logger.info("[%s] %s (confidence=%.2f): %s",
-                    persona.name, vote.decision, vote.confidence, vote.reasoning)
-        return VoteRecord(persona=persona, vote=vote)
+        logger.info("[%s via %s] %s (confidence=%.2f): %s",
+                    persona.name, served_by, vote.decision,
+                    vote.confidence, vote.reasoning)
+        return VoteRecord(persona=persona, vote=vote, served_by=served_by)
 
     def convene(self, snapshot: MarketSnapshot) -> CouncilDecision:
         """全ペルソナに並列で意見を聞き、重み付き投票で集約する。"""
@@ -124,7 +120,6 @@ class Council:
             decision = action
         else:
             decision = "HOLD"
-            ratio = scores[action] / total if total > 0 else 0.0
 
         return CouncilDecision(
             decision=decision,

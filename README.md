@@ -11,8 +11,8 @@ $ pip install git+https://github.com/pedestrian618/bitflyerapi
 
 ## aitrader — AI協議会自動売買ボット
 
-複数の「人格」を持った生成AI(Claude)がそれぞれ相場を分析し、
-重み付き投票で売買タイミングを合議決定するボットです。
+複数の「人格」を持った生成AI(Claude / ChatGPT / Gemini の混成)がそれぞれ
+相場を分析し、重み付き投票で売買タイミングを合議決定するボットです。
 
 ### 仕組み
 
@@ -24,13 +24,14 @@ bitFlyer公開API ──▶ 相場スナップショット
                           │   SQLiteに1分足を毎サイクル蓄積
                           │   (aitrader_history.db、数日で中期データが育つ)
                           ▼
-            ┌──────── AI協議会(並列で意見聴取) ────────┐
-            │ 慎重派リスク管理者・堅田   (重み1.5)      │
-            │ トレンドフォロワー・波多野 (重み1.0)      │
-            │ 逆張りコントラリアン・逆瀬川(重み1.0)     │
-            │ 短期筋スキャルパー・疾風   (重み0.8)      │
-            │ マクロ分析官・大局        (重み1.2)      │
-            └──────────────┬──────────────────────────┘
+            ┌──────────── AI協議会(並列で意見聴取) ────────────┐
+            │ 慎重派リスク管理者・堅田   (1.5) Claude 重量級    │
+            │ トレンドフォロワー・波多野 (1.0) ChatGPT 重量級   │
+            │ 逆張りコントラリアン・逆瀬川(1.0) Claude 軽量級   │
+            │ 短期筋スキャルパー・疾風   (0.8) ChatGPT 軽量級   │
+            │ マクロ分析官・大局        (1.2) Gemini 重量級     │
+            │  ※プロバイダ障害時は他社の同ティアへ自動切替      │
+            └──────────────┬──────────────────────────────────┘
                            │ 各自 BUY/SELL/HOLD + 確信度(0〜1)
                            ▼
               重み付き投票で集約(合意条件を満たさなければHOLD)
@@ -46,9 +47,20 @@ bitFlyer公開API ──▶ 相場スナップショット
 ### セットアップ
 
 ```bash
-pip install anthropic requests
-export ANTHROPIC_API_KEY=sk-ant-...   # Claude APIキー
+pip install anthropic openai google-genai requests
+
+# LLM APIキー(設定したものだけが協議会に参加。最低1つでOK)
+export ANTHROPIC_API_KEY=sk-ant-...   # Claude
+export OPENAI_API_KEY=sk-...          # ChatGPT
+export GEMINI_API_KEY=...             # Gemini
 ```
+
+**マルチプロバイダとフェイルオーバー**:
+各ペルソナには担当プロバイダとモデルティア(重量級/軽量級)が割り当てられています。
+あるプロバイダのAPIが落ちている・レート制限・キー未設定などの場合、
+**他プロバイダの同ティアモデルへ自動フェイルオーバー**します。
+失敗したプロバイダは10分間回避され(サーキットブレーカー)、成功すれば即復帰します。
+キーを1つしか設定しなければ、全ペルソナがそのプロバイダで動きます。
 
 実売買する場合のみ(**デフォルトはドライラン=実注文なし**):
 
@@ -77,7 +89,13 @@ python -m aitrader          # ループ実行(デフォルト1時間間隔)
 |---|---|---|
 | `AITRADER_DRY_RUN` | `1` | `0`で実注文を送信 |
 | `AITRADER_PRODUCT_CODE` | `BTC_JPY` | 取引銘柄 |
-| `AITRADER_MODEL` | `claude-opus-4-8` | 使用するClaudeモデル |
+| `AITRADER_CLAUDE_MODEL_HEAVY` | `claude-opus-4-8` | Claude重量級モデル |
+| `AITRADER_CLAUDE_MODEL_LIGHT` | `claude-haiku-4-5` | Claude軽量級モデル |
+| `AITRADER_OPENAI_MODEL_HEAVY` | `gpt-5.1` | ChatGPT重量級モデル |
+| `AITRADER_OPENAI_MODEL_LIGHT` | `gpt-5-mini` | ChatGPT軽量級モデル |
+| `AITRADER_GEMINI_MODEL_HEAVY` | `gemini-2.5-pro` | Gemini重量級モデル |
+| `AITRADER_GEMINI_MODEL_LIGHT` | `gemini-2.5-flash` | Gemini軽量級モデル |
+| `AITRADER_LLM_COOLDOWN_SEC` | `600` | 失敗プロバイダの回避時間(秒) |
 | `AITRADER_ORDER_SIZE_BTC` | `0.001` | 1回の注文量(BTC) |
 | `AITRADER_MAX_POSITION_BTC` | `0.01` | 最大保有量(BTC) |
 | `AITRADER_MIN_JPY_BALANCE` | `10000` | BUYに必要な最低JPY残高 |
@@ -91,4 +109,6 @@ python -m aitrader          # ループ実行(デフォルト1時間間隔)
 
 - **投資は自己責任です。** 本ボットは利益を保証するものではありません
 - まずはドライランで協議会の判断ログを観察してから、少額で実売買を試してください
-- Claude API利用料が1サイクルあたり数円〜数十円程度かかります(5ペルソナ並列呼び出し)
+- LLM API利用料が1サイクルあたり数円〜数十円かかります(5ペルソナ並列呼び出し、3社に分散)。
+  コストを下げたいときは重量級モデルの環境変数を安価なモデルに差し替えてください
+- モデル名は各社のリリースで変わります。デフォルトが古くなったら環境変数で最新のモデルIDに更新してください

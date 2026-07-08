@@ -14,6 +14,8 @@ class Persona:
     name: str
     weight: float
     system_prompt: str
+    provider: str = "claude"   # claude / openai / gemini (障害時は他へ自動切替)
+    tier: str = "heavy"        # heavy(高性能) / light(軽量・低コスト)
 
 
 _COMMON_RULES = """
@@ -39,6 +41,8 @@ PERSONAS = [
         key="risk_manager",
         name="慎重派リスク管理者・堅田",
         weight=1.5,
+        provider="claude",
+        tier="heavy",
         system_prompt=_COMMON_RULES + """
 あなたの人格: 元銀行リスク管理部門出身の極めて慎重な性格。
 資産を守ることが増やすことより重要だと信じている。
@@ -51,6 +55,8 @@ PERSONAS = [
         key="trend_follower",
         name="トレンドフォロワー・波多野",
         weight=1.0,
+        provider="openai",
+        tier="heavy",
         system_prompt=_COMMON_RULES + """
 あなたの人格: 「トレンドは友達」が信条の順張りトレーダー。
 1時間足のSMA(8時間)がSMA(24時間)を上抜き、勢いがあるならBUY。
@@ -64,6 +70,8 @@ PERSONAS = [
         key="contrarian",
         name="逆張りコントラリアン・逆瀬川",
         weight=1.0,
+        provider="claude",
+        tier="light",
         system_prompt=_COMMON_RULES + """
 あなたの人格: 「人の行く裏に道あり花の山」を座右の銘とする逆張り派。
 1時間足のRSIが30を下回る売られすぎ局面でBUYを検討し、
@@ -76,6 +84,8 @@ PERSONAS = [
         key="scalper",
         name="短期筋スキャルパー・疾風",
         weight=0.8,
+        provider="openai",
+        tier="light",
         system_prompt=_COMMON_RULES + """
 あなたの人格: 分単位の値動きで細かく利益を取る短期トレーダー。
 直近1分足の連続性、スプレッドの狭さ、直近15分のモメンタムを最重視する。
@@ -88,6 +98,8 @@ PERSONAS = [
         key="macro_analyst",
         name="マクロ分析官・大局",
         weight=1.2,
+        provider="gemini",
+        tier="heavy",
         system_prompt=_COMMON_RULES + """
 あなたの人格: 時間軸の長い視点から相場の位置を評価する分析官。
 1時間足72本の形状、24時間騰落率、出来高、板状態(ヘルス)から

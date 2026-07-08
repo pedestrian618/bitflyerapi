@@ -28,8 +28,30 @@ class Config:
     bitflyer_secret: str = field(default_factory=lambda: os.environ.get("BITFLYER_API_SECRET", ""))
     product_code: str = field(default_factory=lambda: os.environ.get("AITRADER_PRODUCT_CODE", "BTC_JPY"))
 
-    # Claude
-    model: str = field(default_factory=lambda: os.environ.get("AITRADER_MODEL", "claude-opus-4-8"))
+    # LLM(プロバイダ × 軽量/重量ティア)
+    # ペルソナごとに provider/tier が割り当てられ、障害時は他プロバイダの
+    # 同ティアモデルへ自動フェイルオーバーする。
+    claude_model_heavy: str = field(default_factory=lambda: os.environ.get(
+        "AITRADER_CLAUDE_MODEL_HEAVY", os.environ.get("AITRADER_MODEL", "claude-opus-4-8")))
+    claude_model_light: str = field(default_factory=lambda: os.environ.get(
+        "AITRADER_CLAUDE_MODEL_LIGHT", "claude-haiku-4-5"))
+    openai_model_heavy: str = field(default_factory=lambda: os.environ.get(
+        "AITRADER_OPENAI_MODEL_HEAVY", "gpt-5.1"))
+    openai_model_light: str = field(default_factory=lambda: os.environ.get(
+        "AITRADER_OPENAI_MODEL_LIGHT", "gpt-5-mini"))
+    gemini_model_heavy: str = field(default_factory=lambda: os.environ.get(
+        "AITRADER_GEMINI_MODEL_HEAVY", "gemini-2.5-pro"))
+    gemini_model_light: str = field(default_factory=lambda: os.environ.get(
+        "AITRADER_GEMINI_MODEL_LIGHT", "gemini-2.5-flash"))
+    llm_cooldown_sec: int = field(default_factory=lambda: int(os.environ.get(
+        "AITRADER_LLM_COOLDOWN_SEC", "600")))
+
+    def llm_models(self) -> dict:
+        return {
+            "claude": {"heavy": self.claude_model_heavy, "light": self.claude_model_light},
+            "openai": {"heavy": self.openai_model_heavy, "light": self.openai_model_light},
+            "gemini": {"heavy": self.gemini_model_heavy, "light": self.gemini_model_light},
+        }
 
     # 売買設定
     dry_run: bool = field(default_factory=lambda: _env_bool("AITRADER_DRY_RUN", True))

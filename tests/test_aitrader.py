@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from aitrader.config import Config
 from aitrader.council import Council, PersonaVote, VoteRecord
 from aitrader.history import HistoryStore
+from aitrader.llm import LLMError, LLMRouter
 from aitrader.market import Candle, MarketSnapshot, _build_candles_1m, _rsi, _sma
 from aitrader.personas import PERSONAS
 from aitrader.trader import Trader
@@ -105,6 +106,116 @@ class TestIndicators(unittest.TestCase):
 
     def test_rsi_insufficient_data(self):
         self.assertEqual(_rsi([1, 2, 3]), 50.0)
+
+
+class _FakeProvider:
+    """LLMRouterのテスト用ダミープロバイダ。"""
+    def __init__(self, name, fail=False, configured=True):
+        self.name = name
+        self.fail = fail
+        self._configured = configured
+        self.models = {"heavy": f"{name}-heavy", "light": f"{name}-light"}
+        self.calls = 0
+
+    def configured(self):
+        return self._configured
+
+    def ask(self, tier, system, user):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError(f"{self.name} down")
+        return PersonaVote(decision="BUY", confidence=0.7,
+                           reasoning=f"{self.name}/{tier}")
+
+
+def _router(**providers) -> LLMRouter:
+    r = LLMRouter.__new__(LLMRouter)
+    r._providers = providers
+    r.cooldown_sec = 600
+    r._down_until = {}
+    import threading
+    r._lock = threading.Lock()
+    return r
+
+
+class TestLLMRouter(unittest.TestCase):
+    def test_preferred_provider_used(self):
+        r = _router(claude=_FakeProvider("claude"),
+                    openai=_FakeProvider("openai"),
+                    gemini=_FakeProvider("gemini"))
+        vote, served = r.ask("openai", "heavy", "sys", "user")
+        self.assertEqual(served, "openai:openai-heavy")
+        self.assertEqual(vote.reasoning, "openai/heavy")
+
+    def test_failover_to_next_provider_same_tier(self):
+        r = _router(claude=_FakeProvider("claude"),
+                    openai=_FakeProvider("openai", fail=True),
+                    gemini=_FakeProvider("gemini"))
+        vote, served = r.ask("openai", "light", "sys", "user")
+        # openai失敗 → PROVIDER_ORDER順でclaudeへ、同じlightティア
+        self.assertEqual(served, "claude:claude-light")
+
+    def test_unconfigured_provider_skipped(self):
+        r = _router(claude=_FakeProvider("claude", configured=False),
+                    openai=_FakeProvider("openai", configured=False),
+                    gemini=_FakeProvider("gemini"))
+        vote, served = r.ask("claude", "heavy", "sys", "user")
+        self.assertEqual(served, "gemini:gemini-heavy")
+
+    def test_all_providers_fail_raises(self):
+        r = _router(claude=_FakeProvider("claude", fail=True),
+                    openai=_FakeProvider("openai", fail=True),
+                    gemini=_FakeProvider("gemini", fail=True))
+        with self.assertRaises(LLMError):
+            r.ask("claude", "heavy", "sys", "user")
+
+    def test_no_configured_provider_raises(self):
+        r = _router(claude=_FakeProvider("claude", configured=False),
+                    openai=_FakeProvider("openai", configured=False),
+                    gemini=_FakeProvider("gemini", configured=False))
+        with self.assertRaises(LLMError):
+            r.ask("claude", "heavy", "sys", "user")
+
+    def test_circuit_breaker_avoids_failed_provider(self):
+        failing = _FakeProvider("openai", fail=True)
+        r = _router(claude=_FakeProvider("claude"),
+                    openai=failing,
+                    gemini=_FakeProvider("gemini"))
+        r.ask("openai", "heavy", "s", "u")   # openai失敗 → ダウン記録
+        r.ask("openai", "heavy", "s", "u")   # 回避中なのでopenaiは呼ばれない
+        self.assertEqual(failing.calls, 1)
+
+    def test_recovery_after_success(self):
+        p = _FakeProvider("openai", fail=True)
+        r = _router(claude=_FakeProvider("claude"),
+                    openai=p,
+                    gemini=_FakeProvider("gemini"))
+        r.ask("openai", "heavy", "s", "u")
+        p.fail = False
+        r._down_until["openai"] = 0.0  # クールダウン明けを再現
+        vote, served = r.ask("openai", "heavy", "s", "u")
+        self.assertEqual(served, "openai:openai-heavy")
+
+
+class TestPersonaAssignments(unittest.TestCase):
+    def test_all_personas_have_valid_provider_and_tier(self):
+        from aitrader.llm import PROVIDER_ORDER
+        providers_used = set()
+        tiers_used = set()
+        for p in PERSONAS:
+            self.assertIn(p.provider, PROVIDER_ORDER)
+            self.assertIn(p.tier, ("heavy", "light"))
+            providers_used.add(p.provider)
+            tiers_used.add(p.tier)
+        # 3プロバイダ・両ティアが実際に使われている(混合構成)
+        self.assertEqual(providers_used, {"claude", "openai", "gemini"})
+        self.assertEqual(tiers_used, {"heavy", "light"})
+
+    def test_config_llm_models_shape(self):
+        models = Config().llm_models()
+        for provider in ("claude", "openai", "gemini"):
+            self.assertIn("heavy", models[provider])
+            self.assertIn("light", models[provider])
 
 
 class TestHistoryStore(unittest.TestCase):
