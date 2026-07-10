@@ -31,18 +31,21 @@ class Config:
     # LLM(プロバイダ × 軽量/重量ティア)
     # ペルソナごとに provider/tier が割り当てられ、障害時は他プロバイダの
     # 同ティアモデルへ自動フェイルオーバーする。
+    # heavy はコスト都合で Opus ではなく Sonnet(判断タスクならほぼ同品質で約6割安)
     claude_model_heavy: str = field(default_factory=lambda: os.environ.get(
-        "AITRADER_CLAUDE_MODEL_HEAVY", os.environ.get("AITRADER_MODEL", "claude-opus-4-8")))
+        "AITRADER_CLAUDE_MODEL_HEAVY", os.environ.get("AITRADER_MODEL", "claude-sonnet-5")))
     claude_model_light: str = field(default_factory=lambda: os.environ.get(
         "AITRADER_CLAUDE_MODEL_LIGHT", "claude-haiku-4-5"))
     openai_model_heavy: str = field(default_factory=lambda: os.environ.get(
         "AITRADER_OPENAI_MODEL_HEAVY", "gpt-5.1"))
     openai_model_light: str = field(default_factory=lambda: os.environ.get(
         "AITRADER_OPENAI_MODEL_LIGHT", "gpt-5-mini"))
+    # Gemini は固定バージョンの廃止が早いため常に最新安定版を指すエイリアスを使う
+    # (gemini-2.5-pro は 2026-07 時点で新規ユーザーに 404 を返す)
     gemini_model_heavy: str = field(default_factory=lambda: os.environ.get(
-        "AITRADER_GEMINI_MODEL_HEAVY", "gemini-2.5-pro"))
+        "AITRADER_GEMINI_MODEL_HEAVY", "gemini-pro-latest"))
     gemini_model_light: str = field(default_factory=lambda: os.environ.get(
-        "AITRADER_GEMINI_MODEL_LIGHT", "gemini-2.5-flash"))
+        "AITRADER_GEMINI_MODEL_LIGHT", "gemini-flash-latest"))
     llm_cooldown_sec: int = field(default_factory=lambda: int(os.environ.get(
         "AITRADER_LLM_COOLDOWN_SEC", "600")))
 
