@@ -16,7 +16,7 @@ setup(
     long_description=readme,
     author='pedestrian618',
     url='https://github.com/pedestrian618/bitflyerapi',
-    install_requires=['requests'],
+    install_requires=['requests', 'anthropic', 'openai', 'google-genai'],
     license=license,
     packages=find_packages(exclude=('tests', 'docs'))
 )
