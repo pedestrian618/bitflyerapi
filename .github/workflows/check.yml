@@ -1,0 +1,25 @@
+# Python コードの構文チェックのみ(シークレット不要・ライブAPIは叩かない)。
+# junkyfly の ops-check.yml と同方式。全ブランチの push で走る。
+name: syntax check
+
+on:
+  push:
+    paths:
+      - 'aitrader/**'
+      - 'bitflyerapi/**'
+  workflow_dispatch: {}
+
+jobs:
+  py-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Syntax check (compileall)
+        run: python -m compileall -q aitrader bitflyerapi
