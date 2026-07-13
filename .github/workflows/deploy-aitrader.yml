@@ -1,0 +1,70 @@
+# ==========================================================================
+# aitrader 自動デプロイ (XServer ~/aitrader/)
+#
+# main に push され、差分に aitrader/bitflyerapi のコードが含まれるときだけ走る。
+# junkyfly の deploy-web.yml と同方式(Secrets の SSH 鍵で rsync)。
+# サーバー側の .env / .venv / *.db / *.log は除外で保護される(--delete でも消えない)。
+# デプロイ後にサーバー上で --report を実行し、import と DB が壊れていないか確認する。
+#
+# 必要な Secrets (junkyfly リポジトリと同じ値):
+#   XSERVER_SSH_KEY / XSERVER_SSH_PORT / XSERVER_SSH_USER / XSERVER_SSH_HOST
+# ==========================================================================
+name: Deploy aitrader
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'aitrader/**'
+      - 'bitflyerapi/**'
+      - '.github/workflows/deploy-aitrader.yml'
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.XSERVER_SSH_KEY }}" > ~/.ssh/xserver_key
+          chmod 600 ~/.ssh/xserver_key
+
+      - name: Stamp deploy version
+        run: |
+          {
+            git rev-parse --short HEAD
+            date -u "+%Y-%m-%dT%H:%M:%SZ (via GitHub Actions)"
+          } > .deploy_version
+
+      - name: Rsync to XServer ~/aitrader/
+        env:
+          SSH_PORT: ${{ secrets.XSERVER_SSH_PORT }}
+          SSH_USER: ${{ secrets.XSERVER_SSH_USER }}
+          SSH_HOST: ${{ secrets.XSERVER_SSH_HOST }}
+        run: |
+          set -euo pipefail
+          PORT="${SSH_PORT:-10022}"
+          rsync -avz --delete \
+            --exclude .git --exclude .venv --exclude __pycache__ \
+            --exclude '.env*' --exclude '*.db' --exclude '*.log' \
+            --exclude .claude --exclude .DS_Store --exclude 'deploy/keys' \
+            -e "ssh -i ~/.ssh/xserver_key -p ${PORT} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null" \
+            ./ \
+            "${SSH_USER}@${SSH_HOST}:aitrader/"
+
+      - name: Smoke test (--report on server)
+        env:
+          SSH_PORT: ${{ secrets.XSERVER_SSH_PORT }}
+          SSH_USER: ${{ secrets.XSERVER_SSH_USER }}
+          SSH_HOST: ${{ secrets.XSERVER_SSH_HOST }}
+        run: |
+          set -euo pipefail
+          PORT="${SSH_PORT:-10022}"
+          ssh -i ~/.ssh/xserver_key -p "${PORT}" \
+            -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+            "${SSH_USER}@${SSH_HOST}" \
+            "cd aitrader && .venv/bin/python -m aitrader --report && echo && echo 'deployed version:' && cat .deploy_version"

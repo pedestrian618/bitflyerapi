@@ -5,6 +5,7 @@
     python -m aitrader            # ループ実行(デフォルト: ドライラン)
     python -m aitrader --once     # 1サイクルだけ実行して終了
     python -m aitrader --collect  # 市況データの収集のみ(LLM・売買なし)
+    python -m aitrader --report   # 仮想P&L(協議会・ペルソナ別)を表示して終了
 """
 
 import argparse
@@ -17,6 +18,7 @@ from .config import Config
 from .council import Council
 from .history import HistoryStore
 from .market import fetch_market_snapshot
+from .paper import PaperBook
 from .trader import Trader
 
 
@@ -48,7 +50,17 @@ def main():
                         help="1サイクルだけ実行して終了する")
     parser.add_argument("--collect", action="store_true",
                         help="市況データを履歴DBに蓄積するだけで終了する(LLM・売買なし)")
+    parser.add_argument("--report", action="store_true",
+                        help="仮想P&L(協議会・ペルソナ別)を表示して終了する")
     args = parser.parse_args()
+
+    if args.report:
+        book = PaperBook.from_config(Config())
+        try:
+            print(book.report_text())
+        finally:
+            book.close()
+        return
 
     if args.collect:
         logging.basicConfig(
@@ -76,10 +88,12 @@ def main():
         council = Council(config)
         trader = Trader(config)
         store = HistoryStore(config.history_path)
+        paper = PaperBook.from_config(config)
         try:
-            run_once(config, council, trader, store=store)
+            run_once(config, council, trader, store=store, paper=paper)
         finally:
             store.close()
+            paper.close()
     else:
         run_loop()
 

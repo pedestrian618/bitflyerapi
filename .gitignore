@@ -133,3 +133,5 @@ dmypy.json
 
 # aitrader
 aitrader_history.db
+.deploy_version
+deploy/keys/
