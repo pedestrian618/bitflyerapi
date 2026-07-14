@@ -1,0 +1,410 @@
+# -*- coding: utf-8 -*-
+"""静的HTMLダッシュボード生成。
+
+サイクルごとに履歴DB(aitrader_history.db)の内容から自己完結のHTMLを
+1枚生成して AITRADER_DASHBOARD_PATH に書き出す。XServer の public_html
+配下を指定すれば、SSHせずにブラウザから稼働状況・協議会の判断・仮想P&Lを
+確認できる。外部アセットなし(CSS/SVGはすべてインライン)。
+認証は同ディレクトリに置く .htaccess のBasic認証を想定
+(deploy/htaccess.example 参照。認証なしで公開する場合は置かなくてよい)。
+"""
+
+import bisect
+import html
+import os
+import sqlite3
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from .config import Config
+from .paper import COUNCIL_ACTOR, PaperBook
+from .personas import PERSONAS
+
+JST = timezone(timedelta(hours=9), name="JST")
+
+# 表示上限
+HISTORY_CYCLES = 24     # 判断履歴テーブルの行数
+CHART_HOURS = 48        # 価格チャートの期間
+CHART_MAX_POINTS = 480  # チャートのダウンサンプリング上限
+
+_VOTE_CLASS = {"BUY": "buy", "SELL": "sell", "HOLD": "hold"}
+
+_CSS = """
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; padding: 16px; max-width: 1080px; margin: 0 auto; }
+h1 { font-size: 1.2rem; margin-bottom: 4px; }
+h2 { font-size: 1rem; color: #94a3b8; margin: 24px 0 8px; }
+.meta { color: #64748b; font-size: 0.8rem; margin-bottom: 12px; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; margin-right: 6px; }
+.badge.dry { background: #1e3a8a; color: #93c5fd; }
+.badge.live { background: #7f1d1d; color: #fca5a5; }
+.warn { background: #422006; border: 1px solid #a16207; color: #fbbf24; padding: 10px 14px; border-radius: 8px; margin: 12px 0; font-size: 0.85rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0; }
+.card { background: #1e293b; border-radius: 10px; padding: 12px 14px; }
+.card .label { color: #94a3b8; font-size: 0.7rem; }
+.card .value { font-size: 1.15rem; font-weight: 700; margin-top: 2px; }
+.card .sub { color: #64748b; font-size: 0.7rem; margin-top: 2px; }
+table { width: 100%; border-collapse: collapse; font-size: 0.8rem; background: #1e293b; border-radius: 10px; overflow: hidden; }
+th, td { padding: 7px 9px; text-align: left; border-bottom: 1px solid #0f172a; white-space: nowrap; }
+th { color: #94a3b8; font-weight: 600; font-size: 0.7rem; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: none; }
+.scroll { overflow-x: auto; }
+.vote { display: inline-block; min-width: 3.2em; text-align: center; padding: 1px 6px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
+.vote.buy { background: #14532d; color: #4ade80; }
+.vote.sell { background: #7f1d1d; color: #f87171; }
+.vote.hold { background: #334155; color: #94a3b8; }
+.pos { color: #4ade80; } .neg { color: #f87171; }
+.reason { white-space: normal; color: #cbd5e1; min-width: 220px; }
+.served { color: #64748b; font-size: 0.7rem; }
+svg { width: 100%; height: auto; display: block; background: #1e293b; border-radius: 10px; }
+footer { color: #475569; font-size: 0.7rem; margin: 24px 0 8px; }
+"""
+
+
+def _jst(ts: str, fmt: str = "%m/%d %H:%M") -> str:
+    """UTCのISO文字列("...+00:00" またはnaive)をJST表記にする。"""
+    try:
+        dt = datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return str(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(JST).strftime(fmt)
+
+
+def _esc(text) -> str:
+    return html.escape(str(text), quote=True)
+
+
+def _vote_chip(vote: str) -> str:
+    cls = _VOTE_CLASS.get(vote, "hold")
+    return f'<span class="vote {cls}">{_esc(vote)}</span>'
+
+
+def _signed(value: float, unit: str = "") -> str:
+    cls = "pos" if value >= 0 else "neg"
+    return f'<span class="{cls}">{value:+,.0f}{unit}</span>'
+
+
+def _short_name(name: str) -> str:
+    """「慎重派リスク管理者・堅田」→「堅田」"""
+    return name.rsplit("・", 1)[-1]
+
+
+def _query(conn, sql, params=()):
+    """テーブル未作成(蓄積開始前)の場合は空リストを返す。"""
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
+# --- 各セクション ---
+
+def _minute_closes(conn, product_code: str) -> list:
+    """チャート用の (minute, close)。古い順、直近CHART_HOURS時間・上限件数まで。"""
+    rows = _query(conn, """
+        SELECT minute, close FROM candles_1m
+        WHERE product_code = ? ORDER BY minute DESC LIMIT ?
+    """, (product_code, CHART_HOURS * 60))
+    rows.reverse()
+    if len(rows) > CHART_MAX_POINTS:
+        step = -(-len(rows) // CHART_MAX_POINTS)  # ceil
+        sampled = rows[::step]
+        if sampled[-1] != rows[-1]:
+            sampled.append(rows[-1])
+        rows = sampled
+    return rows
+
+
+def _price_chart(conn, product_code: str) -> str:
+    rows = _minute_closes(conn, product_code)
+    if len(rows) < 2:
+        return "<p class='meta'>チャート表示に必要な価格データがまだありません。</p>"
+
+    width, height = 960, 260
+    pad_l, pad_r, pad_t, pad_b = 70, 16, 16, 28
+    plot_w, plot_h = width - pad_l - pad_r, height - pad_t - pad_b
+
+    closes = [r[1] for r in rows]
+    lo, hi = min(closes), max(closes)
+    span = (hi - lo) or 1.0
+    lo -= span * 0.03
+    hi += span * 0.03
+    span = hi - lo
+
+    def x(i):
+        return pad_l + plot_w * i / (len(rows) - 1)
+
+    def y(price):
+        return pad_t + plot_h * (1 - (price - lo) / span)
+
+    parts = [f'<svg viewBox="0 0 {width} {height}" role="img" '
+             f'aria-label="{_esc(product_code)} 価格チャート">']
+
+    # 水平グリッドと価格ラベル
+    for i in range(5):
+        gy = pad_t + plot_h * i / 4
+        price = hi - span * i / 4
+        parts.append(f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{width - pad_r}" '
+                     f'y2="{gy:.1f}" stroke="#334155" stroke-width="1"/>')
+        parts.append(f'<text x="{pad_l - 6}" y="{gy + 4:.1f}" fill="#94a3b8" '
+                     f'font-size="11" text-anchor="end">{price:,.0f}</text>')
+
+    points = " ".join(f"{x(i):.1f},{y(c):.1f}" for i, c in enumerate(closes))
+    parts.append(f'<polyline points="{points}" fill="none" '
+                 f'stroke="#38bdf8" stroke-width="1.6"/>')
+
+    # 協議会の仮想約定マーカー(BUY ▲ / SELL ▼)
+    # ダウンサンプリングで分が間引かれているため最近傍の点に置く
+    minutes = [minute for minute, _ in rows]
+    trades = _query(conn, """
+        SELECT ts, vote, price FROM paper_ledger
+        WHERE actor = ? AND executed = 1 ORDER BY ts
+    """, (COUNCIL_ACTOR,))
+    for ts, vote, price in trades:
+        minute = str(ts)[:16]
+        if minute < minutes[0] or minute > minutes[-1]:
+            continue
+        i = min(bisect.bisect_left(minutes, minute), len(minutes) - 1)
+        cx, cy = x(i), y(price)
+        if vote == "BUY":
+            parts.append(f'<path d="M{cx:.1f} {cy + 12:.1f} l-6 10 h12 z" '
+                         f'fill="#4ade80"/>')
+        else:
+            parts.append(f'<path d="M{cx:.1f} {cy - 12:.1f} l-6 -10 h12 z" '
+                         f'fill="#f87171"/>')
+
+    # 時刻ラベル(両端、JST)
+    for i, anchor in ((0, "start"), (len(rows) - 1, "end")):
+        label = _jst(rows[i][0])
+        parts.append(f'<text x="{x(i):.1f}" y="{height - 8}" fill="#94a3b8" '
+                     f'font-size="11" text-anchor="{anchor}">{label} JST</text>')
+
+    parts.append("</svg>")
+    parts.append("<p class='meta'>▲=協議会の仮想BUY / ▼=仮想SELL(ペーパートレード)</p>")
+    return "\n".join(parts)
+
+
+def _latest_council(conn) -> str:
+    rows = _query(conn, """
+        SELECT actor, decision, confidence, weight, score, served_by, reasoning
+        FROM council_log WHERE ts = (SELECT MAX(ts) FROM council_log)
+    """)
+    if not rows:
+        return "<p class='meta'>協議会の記録はまだありません(次のサイクルから記録されます)。</p>"
+
+    names = {p.key: p.name for p in PERSONAS}
+    council = next((r for r in rows if r[0] == COUNCIL_ACTOR), None)
+    personas = sorted((r for r in rows if r[0] != COUNCIL_ACTOR),
+                      key=lambda r: r[4], reverse=True)
+
+    parts = []
+    if council:
+        parts.append(f"<p style='margin-bottom:8px'>結論: {_vote_chip(council[1])} "
+                     f"<span class='meta'>{_esc(council[6])}</span></p>")
+    parts.append("<div class='scroll'><table><tr>"
+                 "<th>ペルソナ</th><th>判断</th><th>確信度</th><th>スコア</th>"
+                 "<th>応答モデル</th><th>判断根拠</th></tr>")
+    for actor, decision, conf, weight, score, served_by, reasoning in personas:
+        parts.append(
+            f"<tr><td>{_esc(names.get(actor, actor))}</td>"
+            f"<td>{_vote_chip(decision)}</td>"
+            f"<td class='num'>{conf:.2f} × {weight:g}</td>"
+            f"<td class='num'>{score:.2f}</td>"
+            f"<td class='served'>{_esc(served_by)}</td>"
+            f"<td class='reason'>{_esc(reasoning)}</td></tr>")
+    parts.append("</table></div>")
+    return "\n".join(parts)
+
+
+def _vote_history(conn) -> str:
+    rows = _query(conn, """
+        SELECT ts, actor, vote, ltp FROM paper_ledger
+        WHERE ts IN (SELECT DISTINCT ts FROM paper_ledger ORDER BY ts DESC LIMIT ?)
+        ORDER BY ts DESC
+    """, (HISTORY_CYCLES,))
+    if not rows:
+        return "<p class='meta'>判断履歴はまだありません。</p>"
+
+    cycles = {}  # ts → {actor: vote, "ltp": ...}(挿入順=新しい順)
+    for ts, actor, vote, ltp in rows:
+        cycles.setdefault(ts, {"ltp": ltp})[actor] = vote
+
+    keys = [COUNCIL_ACTOR] + [p.key for p in PERSONAS]
+    headers = ["時刻(JST)", "価格"] + ["協議会"] + \
+        [_short_name(p.name) for p in PERSONAS]
+    parts = ["<div class='scroll'><table><tr>" +
+             "".join(f"<th>{_esc(h)}</th>" for h in headers) + "</tr>"]
+    for ts, votes in cycles.items():
+        cells = [f"<td>{_esc(_jst(ts))}</td>",
+                 f"<td class='num'>{votes['ltp']:,.0f}</td>"]
+        cells += [f"<td>{_vote_chip(votes[k]) if k in votes else '<span class=meta>—</span>'}</td>"
+                  for k in keys]
+        parts.append("<tr>" + "".join(cells) + "</tr>")
+    parts.append("</table></div>")
+    return "\n".join(parts)
+
+
+def _pnl_table(summary: dict) -> str:
+    if not summary["cycles"]:
+        return "<p class='meta'>仮想P&Lの記録はまだありません。</p>"
+    parts = ["<div class='scroll'><table><tr>"
+             "<th>アクター</th><th>約定</th><th>ポジション</th><th>平均取得単価</th>"
+             "<th>実現損益</th><th>評価損益</th><th>合計</th></tr>"]
+    for a in summary["actors"]:
+        avg = f"{a['avg_cost']:,.0f}" if a["position"] > 0 else "—"
+        parts.append(
+            f"<tr><td>{_esc(a['name'])}</td>"
+            f"<td class='num'>{a['trades']}回 (B{a['buys']}/S{a['sells']})</td>"
+            f"<td class='num'>{a['position']:.4f} BTC</td>"
+            f"<td class='num'>{avg}</td>"
+            f"<td class='num'>{_signed(a['realized'])}</td>"
+            f"<td class='num'>{_signed(a['unrealized'])}</td>"
+            f"<td class='num'>{_signed(a['total'], ' JPY')}</td></tr>")
+    parts.append("</table></div>")
+    return "\n".join(parts)
+
+
+def _summary_cards(conn, summary: dict, config: Config) -> str:
+    cards = []
+
+    last_ltp = summary.get("last_ltp")
+    if last_ltp:
+        cards.append(("現在値(最終サイクル)", f"{last_ltp:,.0f} JPY", ""))
+
+    # 24時間騰落(蓄積した1分足から)
+    closes = _query(conn, """
+        SELECT close FROM candles_1m WHERE product_code = ?
+        ORDER BY minute DESC LIMIT 1440
+    """, (config.product_code,))
+    if len(closes) >= 2:
+        now_c, base_c = closes[0][0], closes[-1][0]
+        pct = (now_c - base_c) / base_c * 100 if base_c else 0.0
+        hours = min(len(closes) / 60, 24)
+        cards.append((f"騰落率(直近{hours:.0f}時間)", f"{pct:+.2f}%", ""))
+
+    council = next((a for a in summary.get("actors", [])
+                    if a["actor"] == COUNCIL_ACTOR), None)
+    if council:
+        cards.append(("協議会 仮想損益(累計)",
+                      f"{council['total']:+,.0f} JPY",
+                      f"実現 {council['realized']:+,.0f} / 評価 {council['unrealized']:+,.0f}"))
+
+    coverage = _query(conn, """
+        SELECT COUNT(DISTINCT substr(minute, 1, 13)) FROM candles_1m
+        WHERE product_code = ?
+    """, (config.product_code,))
+    hours = coverage[0][0] if coverage else 0
+    cards.append(("履歴蓄積", f"約{hours}時間分",
+                  f"判断 {summary['cycles']}サイクル" if summary["cycles"] else "サイクル記録なし"))
+
+    return "<div class='cards'>" + "".join(
+        f"<div class='card'><div class='label'>{_esc(label)}</div>"
+        f"<div class='value'>{value}</div>"
+        + (f"<div class='sub'>{sub}</div>" if sub else "")
+        + "</div>"
+        for label, value, sub in cards) + "</div>"
+
+
+def _staleness_warning(summary: dict, config: Config, now: datetime) -> str:
+    last_ts = summary.get("last_ts")
+    if not last_ts:
+        return ""
+    try:
+        last = datetime.fromisoformat(last_ts)
+    except ValueError:
+        return ""
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = (now - last).total_seconds()
+    if age > config.interval_sec * 2 + 600:
+        return (f"<div class='warn'>⚠ 最終サイクルから {age / 3600:.1f} 時間更新が"
+                f"ありません。cron やボットが停止していないか確認してください。</div>")
+    return ""
+
+
+def _deploy_version() -> str:
+    path = Path(__file__).resolve().parent.parent / ".deploy_version"
+    try:
+        return path.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+
+
+def generate_html(conn, config: Config, now: datetime = None) -> str:
+    """履歴DBの接続からダッシュボードHTML全体を組み立てる。"""
+    now = now or datetime.now(timezone.utc)
+    book = PaperBook.__new__(PaperBook)  # 既存接続を共有(closeしない)
+    book.conn = conn
+    try:
+        summary = book.summary()
+    except sqlite3.OperationalError:  # 蓄積開始前でテーブル未作成
+        summary = {"cycles": 0, "actors": []}
+
+    mode_badge = ('<span class="badge dry">ドライラン(実注文なし)</span>'
+                  if config.dry_run else
+                  '<span class="badge live">実売買モード</span>')
+    last_cycle = (f"最終サイクル: {_jst(summary['last_ts'], '%Y/%m/%d %H:%M')} JST"
+                  if summary["cycles"] else "サイクル記録なし")
+    version = _deploy_version()
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="300">
+<meta name="robots" content="noindex, nofollow">
+<title>aitrader ダッシュボード</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<h1>aitrader — AI協議会トレーダー</h1>
+<p class="meta">{mode_badge} 銘柄: {_esc(config.product_code)} ／ {last_cycle} ／
+ページ生成: {_jst(now.isoformat(), '%Y/%m/%d %H:%M')} JST(5分ごとに自動再読込)</p>
+{_staleness_warning(summary, config, now)}
+{_summary_cards(conn, summary, config)}
+<h2>価格チャート(直近{CHART_HOURS}時間)</h2>
+{_price_chart(conn, config.product_code)}
+<h2>最新の協議会</h2>
+{_latest_council(conn)}
+<h2>判断履歴(直近{HISTORY_CYCLES}サイクル)</h2>
+{_vote_history(conn)}
+<h2>仮想P&L(ペーパートレード)</h2>
+{_pnl_table(summary)}
+<footer>aitrader dashboard{f' ／ deploy: {_esc(version)}' if version else ''}</footer>
+</body>
+</html>
+"""
+
+
+def write_dashboard(config: Config = None, path: str = None) -> str:
+    """ダッシュボードHTMLを生成してアトミックに書き出し、パスを返す。"""
+    config = config or Config()
+    path = path or config.dashboard_path or "aitrader_dashboard.html"
+
+    conn = sqlite3.connect(config.history_path)
+    try:
+        html_text = generate_html(conn, config)
+    finally:
+        conn.close()
+
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".dashboard-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(html_text)
+        os.chmod(tmp, 0o644)  # mkstempは0600。Webサーバーから読めるようにする
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path

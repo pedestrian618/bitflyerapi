@@ -2,10 +2,11 @@
 """CLIエントリポイント。
 
 使い方:
-    python -m aitrader            # ループ実行(デフォルト: ドライラン)
-    python -m aitrader --once     # 1サイクルだけ実行して終了
-    python -m aitrader --collect  # 市況データの収集のみ(LLM・売買なし)
-    python -m aitrader --report   # 仮想P&L(協議会・ペルソナ別)を表示して終了
+    python -m aitrader              # ループ実行(デフォルト: ドライラン)
+    python -m aitrader --once       # 1サイクルだけ実行して終了
+    python -m aitrader --collect    # 市況データの収集のみ(LLM・売買なし)
+    python -m aitrader --report     # 仮想P&L(協議会・ペルソナ別)を表示して終了
+    python -m aitrader --dashboard  # ダッシュボードHTMLを生成して終了
 """
 
 import argparse
@@ -13,9 +14,10 @@ import logging
 import os
 from pathlib import Path
 
-from .bot import run_loop, run_once
+from .bot import run_loop, run_once, update_dashboard
 from .config import Config
 from .council import Council
+from .dashboard import write_dashboard
 from .history import HistoryStore
 from .market import fetch_market_snapshot
 from .paper import PaperBook
@@ -52,7 +54,15 @@ def main():
                         help="市況データを履歴DBに蓄積するだけで終了する(LLM・売買なし)")
     parser.add_argument("--report", action="store_true",
                         help="仮想P&L(協議会・ペルソナ別)を表示して終了する")
+    parser.add_argument("--dashboard", action="store_true",
+                        help="ダッシュボードHTMLを生成して終了する"
+                             "(出力先: AITRADER_DASHBOARD_PATH、未設定なら aitrader_dashboard.html)")
     args = parser.parse_args()
+
+    if args.dashboard:
+        path = write_dashboard(Config())
+        print(f"ダッシュボードを書き出しました: {path}")
+        return
 
     if args.report:
         book = PaperBook.from_config(Config())
@@ -76,6 +86,7 @@ def main():
                 snapshot.ltp, len(snapshot.candles_1m), snapshot.history_hours)
         finally:
             store.close()
+        update_dashboard(config)  # 収集のみでも価格チャートを最新化する
         return
 
     if args.once:

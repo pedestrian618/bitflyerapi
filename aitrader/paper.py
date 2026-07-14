@@ -45,6 +45,19 @@ class PaperBook:
                 PRIMARY KEY (ts, actor)
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS council_log (
+                ts TEXT NOT NULL,            -- スナップショット時刻(UTC)
+                actor TEXT NOT NULL,         -- 'council' または persona.key
+                decision TEXT NOT NULL,      -- BUY / SELL / HOLD
+                confidence REAL NOT NULL,    -- ペルソナ: 確信度 / 協議会: スコア比
+                weight REAL NOT NULL,        -- ペルソナ: 重み / 協議会: 賛成人数
+                score REAL NOT NULL,         -- 重み × 確信度(協議会は0)
+                served_by TEXT NOT NULL,     -- 実際に応答した "プロバイダ:モデル"
+                reasoning TEXT NOT NULL,     -- 判断根拠
+                PRIMARY KEY (ts, actor)
+            )
+        """)
         self.conn.commit()
 
     @classmethod
@@ -65,7 +78,24 @@ class PaperBook:
                     for r in council_decision.votes]
         for actor, vote in entries:
             self._apply(actor, vote, snapshot)
+        self._log_decisions(snapshot, council_decision)
         self.conn.commit()
+
+    def _log_decisions(self, snapshot, d):
+        """判断根拠つきの詳細ログ(ダッシュボード表示用)を記録する。"""
+        rows = [(snapshot.timestamp, COUNCIL_ACTOR, d.decision,
+                 d.score_ratio, float(d.agree_votes), 0.0, "",
+                 f"スコア比 {d.score_ratio:.0%} / 賛成 {d.agree_votes}名")]
+        rows += [(snapshot.timestamp, r.persona.key, r.vote.decision,
+                  r.vote.confidence, r.persona.weight, r.score,
+                  r.served_by, r.vote.reasoning)
+                 for r in d.votes]
+        self.conn.executemany("""
+            INSERT OR REPLACE INTO council_log
+                (ts, actor, decision, confidence, weight, score,
+                 served_by, reasoning)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, rows)
 
     def _last_state(self, actor: str):
         cur = self.conn.execute("""
@@ -104,24 +134,21 @@ class PaperBook:
 
     # --- 集計 ---
 
-    def report_text(self) -> str:
+    def summary(self) -> dict:
+        """期間情報とアクター別の仮想P&L集計(--report とダッシュボードで共用)。"""
         cur = self.conn.execute("""
             SELECT MIN(ts), MAX(ts), COUNT(DISTINCT ts) FROM paper_ledger
         """)
         first_ts, last_ts, cycles = cur.fetchone()
         if not cycles:
-            return "仮想P&Lの記録はまだありません(次のサイクルから記録されます)。"
+            return {"cycles": 0, "actors": []}
 
         first_ltp = self.conn.execute(
             "SELECT ltp FROM paper_ledger ORDER BY ts ASC LIMIT 1").fetchone()[0]
         last_ltp = self.conn.execute(
             "SELECT ltp FROM paper_ledger ORDER BY ts DESC LIMIT 1").fetchone()[0]
 
-        lines = [
-            f"=== 仮想P&L台帳 {first_ts} 〜 {last_ts} ({cycles}サイクル) ===",
-            f"BTC現物(参考): {first_ltp:,.0f} → {last_ltp:,.0f} JPY "
-            f"({(last_ltp - first_ltp) / first_ltp * 100:+.2f}%)",
-        ]
+        actors = []
         for actor in [COUNCIL_ACTOR] + [p.key for p in PERSONAS]:
             cur = self.conn.execute("""
                 SELECT SUM(executed),
@@ -132,10 +159,34 @@ class PaperBook:
             trades, buys, sells = (v or 0 for v in cur.fetchone())
             position, avg_cost, realized = self._last_state(actor)
             unrealized = position * (last_ltp - avg_cost)
+            actors.append({
+                "actor": actor,
+                "name": _ACTOR_NAMES.get(actor, actor),
+                "trades": trades, "buys": buys, "sells": sells,
+                "position": position, "avg_cost": avg_cost,
+                "realized": realized, "unrealized": unrealized,
+                "total": realized + unrealized,
+            })
+        return {
+            "cycles": cycles, "first_ts": first_ts, "last_ts": last_ts,
+            "first_ltp": first_ltp, "last_ltp": last_ltp, "actors": actors,
+        }
+
+    def report_text(self) -> str:
+        s = self.summary()
+        if not s["cycles"]:
+            return "仮想P&Lの記録はまだありません(次のサイクルから記録されます)。"
+
+        lines = [
+            f"=== 仮想P&L台帳 {s['first_ts']} 〜 {s['last_ts']} ({s['cycles']}サイクル) ===",
+            f"BTC現物(参考): {s['first_ltp']:,.0f} → {s['last_ltp']:,.0f} JPY "
+            f"({(s['last_ltp'] - s['first_ltp']) / s['first_ltp'] * 100:+.2f}%)",
+        ]
+        for a in s["actors"]:
             lines.append(
-                f"[{_ACTOR_NAMES.get(actor, actor)}] 約定 {trades}回 "
-                f"(BUY {buys}/SELL {sells})  ポジ {position:.4f} BTC  "
-                f"実現 {realized:+,.0f}  評価 {unrealized:+,.0f}  "
-                f"合計 {realized + unrealized:+,.0f} JPY"
+                f"[{a['name']}] 約定 {a['trades']}回 "
+                f"(BUY {a['buys']}/SELL {a['sells']})  ポジ {a['position']:.4f} BTC  "
+                f"実現 {a['realized']:+,.0f}  評価 {a['unrealized']:+,.0f}  "
+                f"合計 {a['total']:+,.0f} JPY"
             )
         return "\n".join(lines)

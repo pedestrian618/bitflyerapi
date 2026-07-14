@@ -83,6 +83,32 @@ python -m aitrader          # ループ実行(デフォルト1時間間隔)
 起動直後は中期データが不完全な旨がプロンプトに明記され、
 ペルソナは確信度を落として判断します。**2〜3日回すと中期指標が育ちます。**
 
+### ダッシュボード(ブラウザで状況確認)
+
+SSHせずにブラウザから稼働状況を確認できる静的HTMLダッシュボードを生成できます。
+現在値・価格チャート(協議会の仮想売買マーカー付き)・最新の協議会の判断根拠・
+判断履歴・仮想P&Lが1ページにまとまり、5分ごとに自動再読込されます。
+更新が止まっている場合は警告バナーが出るので、cron停止の検知にも使えます。
+
+```bash
+export AITRADER_DASHBOARD_PATH=/home/USERNAME/example.com/public_html/aitrader-status/index.html
+```
+
+これを設定すると、サイクル(`--once` / ループ / `--collect`)のたびに
+HTMLが再生成されます。手動で生成する場合は:
+
+```bash
+python -m aitrader --dashboard
+```
+
+**Basic認証を掛ける場合**(XServer): `deploy/htaccess.example` の手順どおり、
+`openssl passwd -apr1` でハッシュを作って `.htpasswd` を public_html の外に置き、
+公開ディレクトリに `.htaccess` を配置してください。認証なしで公開する場合は
+`.htaccess` を置かず、推測されにくいディレクトリ名にしておくのが無難です。
+
+生成されるHTMLは外部アセットなしの自己完結ファイルで、APIキー等の秘密情報は
+一切含まれません(相場データと仮想売買の記録のみ)。
+
 ### 主な環境変数
 
 | 変数 | デフォルト | 説明 |
@@ -102,6 +128,7 @@ python -m aitrader          # ループ実行(デフォルト1時間間隔)
 | `AITRADER_INTERVAL_SEC` | `3600` | 判定サイクル間隔(秒) |
 | `AITRADER_COOLDOWN_SEC` | `1800` | 連続発注を防ぐクールダウン(秒) |
 | `AITRADER_HISTORY_PATH` | `aitrader_history.db` | 1分足を蓄積するSQLiteのパス |
+| `AITRADER_DASHBOARD_PATH` | (空=無効) | ダッシュボードHTMLの出力先パス |
 | `AITRADER_MIN_AGREE_VOTES` | `3` | 合意に必要な賛成人数 |
 | `AITRADER_MIN_SCORE_RATIO` | `0.55` | 合意に必要なスコア比 |
 

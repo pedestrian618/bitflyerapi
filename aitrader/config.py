@@ -67,6 +67,10 @@ class Config:
     # 履歴蓄積(1分足をSQLiteに貯めて中期指標を育てる)
     history_path: str = field(default_factory=lambda: os.environ.get("AITRADER_HISTORY_PATH", "aitrader_history.db"))
 
+    # ダッシュボード(静的HTML)の出力先。空なら生成しない。
+    # public_html 配下を指定するとブラウザから稼働状況を確認できる
+    dashboard_path: str = field(default_factory=lambda: os.environ.get("AITRADER_DASHBOARD_PATH", ""))
+
     # 協議会の合意条件
     min_agree_votes: int = field(default_factory=lambda: int(os.environ.get("AITRADER_MIN_AGREE_VOTES", "3")))
     min_score_ratio: float = field(default_factory=lambda: float(os.environ.get("AITRADER_MIN_SCORE_RATIO", "0.55")))

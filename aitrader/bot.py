@@ -6,12 +6,24 @@ import time
 
 from .config import Config
 from .council import Council
+from .dashboard import write_dashboard
 from .history import HistoryStore
 from .market import fetch_market_snapshot
 from .paper import PaperBook
 from .trader import Trader
 
 logger = logging.getLogger(__name__)
+
+
+def update_dashboard(config: Config):
+    """ダッシュボードHTMLを再生成する(失敗しても売買処理には影響させない)。"""
+    if not config.dashboard_path:
+        return
+    try:
+        path = write_dashboard(config)
+        logger.info("ダッシュボード更新: %s", path)
+    except Exception:
+        logger.exception("ダッシュボード生成に失敗(処理は継続します)")
 
 
 def run_once(config: Config, council: Council, trader: Trader,
@@ -30,6 +42,8 @@ def run_once(config: Config, council: Council, trader: Trader,
 
     result = trader.execute(decision.decision)
     logger.info("執行結果: %s", result["reason"])
+
+    update_dashboard(config)
     return {"snapshot": snapshot, "decision": decision, "result": result}
 
 
