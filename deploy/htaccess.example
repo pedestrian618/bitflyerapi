@@ -1,0 +1,22 @@
+# deploy/htaccess.example — ダッシュボード公開ディレクトリ用のBasic認証サンプル
+#
+# 使い方(XServerの場合):
+#   1. サーバー上に公開ディレクトリを作る
+#        mkdir -p ~/example.com/public_html/aitrader-status
+#   2. パスワードのハッシュを生成する(プロンプトにパスワードを入力)
+#        openssl passwd -apr1
+#   3. 「ユーザー名:ハッシュ」を1行書いたファイルを public_html の外に置く
+#        echo 'yourname:$apr1$....' > ~/aitrader/.htpasswd
+#   4. このファイルを .htaccess という名前で公開ディレクトリにコピーし、
+#      AuthUserFile を自分の環境の絶対パスに書き換える
+#   5. ボット側は AITRADER_DASHBOARD_PATH に
+#        /home/USERNAME/example.com/public_html/aitrader-status/index.html
+#      を設定すれば、サイクルごとに index.html が更新される
+#
+# 認証なしで公開する場合は .htaccess 自体を置かなくてよい
+# (その場合もURLは推測されにくいディレクトリ名にしておくこと)
+
+AuthType Basic
+AuthName "aitrader status"
+AuthUserFile /home/USERNAME/aitrader/.htpasswd
+Require valid-user

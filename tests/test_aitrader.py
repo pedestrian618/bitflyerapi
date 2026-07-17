@@ -12,9 +12,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from aitrader.config import Config
 from aitrader.council import Council, PersonaVote, VoteRecord
+from aitrader.dashboard import generate_html, write_dashboard
 from aitrader.history import HistoryStore
 from aitrader.llm import LLMError, LLMRouter
 from aitrader.market import Candle, MarketSnapshot, _build_candles_1m, _rsi, _sma
+from aitrader.paper import PaperBook
 from aitrader.personas import PERSONAS
 from aitrader.trader import Trader
 
@@ -339,6 +341,113 @@ class TestTraderRisk(unittest.TestCase):
         config.bitflyer_secret = ""
         with self.assertRaises(RuntimeError):
             config.validate_for_trading()
+
+
+def _snapshot_for_paper(ts="2026-07-07T10:00:00+00:00", ltp=10000000.0):
+    return MarketSnapshot(
+        product_code="BTC_JPY", timestamp=ts,
+        ltp=ltp, best_bid=ltp - 1000, best_ask=ltp + 1000, spread=2000,
+        volume_24h=1000.0, board_state="RUNNING", health="NORMAL",
+        candles_1m=[], sma_short=0, sma_long=0, rsi_14=50.0,
+        change_pct_15m=0.0, change_pct_60m=0.0,
+    )
+
+
+def _council_decision(votes):
+    """[(persona_idx, decision, confidence), ...] から結論を組み立てる。"""
+    records = [_record(i, d, c) for i, d, c in votes]
+    return _council()._aggregate(records)
+
+
+class TestPaperCouncilLog(unittest.TestCase):
+    def test_record_cycle_logs_reasoning(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PaperBook(path=os.path.join(tmp, "t.db"))
+            decision = _council_decision(
+                [(0, "BUY", 0.8), (1, "BUY", 0.9), (2, "BUY", 0.7),
+                 (3, "HOLD", 0.5), (4, "BUY", 0.6)])
+            book.record_cycle(_snapshot_for_paper(), decision)
+            rows = book.conn.execute(
+                "SELECT actor, decision, reasoning FROM council_log").fetchall()
+            actors = {r[0] for r in rows}
+            self.assertIn("council", actors)
+            self.assertEqual(len(rows), 1 + len(PERSONAS))
+            persona_row = next(r for r in rows if r[0] != "council")
+            self.assertEqual(persona_row[2], "test")
+            council_row = next(r for r in rows if r[0] == "council")
+            self.assertEqual(council_row[1], "BUY")
+            self.assertIn("賛成", council_row[2])
+            book.close()
+
+
+class TestDashboard(unittest.TestCase):
+    def _config(self, tmp):
+        config = Config()
+        config.history_path = os.path.join(tmp, "history.db")
+        config.dashboard_path = os.path.join(tmp, "www", "index.html")
+        return config
+
+    def _populate(self, config):
+        """1分足・仮想売買・協議会ログを1サイクル分書き込む。"""
+        store = HistoryStore(config.history_path)
+        candles = [
+            Candle(time=f"2026-07-07T{h:02d}:{m:02d}:00Z",
+                   open=10000000, high=10000010, low=9999990,
+                   close=10000000 + h * 100 + m, volume=1.0)
+            for h in range(9, 11) for m in range(0, 60, 5)
+        ]
+        store.upsert_candles(config.product_code, candles)
+        store.close()
+
+        book = PaperBook.from_config(config)
+        decision = _council_decision(
+            [(0, "BUY", 0.8), (1, "BUY", 0.9), (2, "BUY", 0.7),
+             (3, "HOLD", 0.5), (4, "BUY", 0.6)])
+        book.record_cycle(_snapshot_for_paper(ts="2026-07-07T10:55:00+00:00"),
+                          decision)
+        book.close()
+
+    def test_write_dashboard_with_data(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            self._populate(config)
+            path = write_dashboard(config)
+            self.assertEqual(path, config.dashboard_path)
+            html = open(path, encoding="utf-8").read()
+            self.assertIn("aitrader ダッシュボード", html)
+            self.assertIn("BTC_JPY", html)
+            self.assertIn("ドライラン", html)
+            self.assertIn("<svg", html)                     # 価格チャート
+            self.assertIn(PERSONAS[0].name, html)           # 協議会テーブル
+            self.assertIn("test", html)                     # 判断根拠
+            self.assertIn("協議会", html)                   # P&L・履歴
+            # 秘密情報を含まないこと(万一キーが環境にあっても混入しない)
+            self.assertNotIn("API_KEY", html)
+
+    def test_write_dashboard_empty_db(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            path = write_dashboard(config)  # DBもテーブルも空
+            html = open(path, encoding="utf-8").read()
+            self.assertIn("まだありません", html)
+
+    def test_reasoning_is_html_escaped(self):
+        import sqlite3
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            book = PaperBook.from_config(config)
+            records = [_record(0, "BUY", 0.8)]
+            records[0].vote.reasoning = "<script>alert(1)</script>"
+            decision = _council()._aggregate(records)
+            book.record_cycle(_snapshot_for_paper(), decision)
+            html = generate_html(book.conn, config)
+            book.close()
+            self.assertNotIn("<script>alert(1)</script>", html)
+            self.assertIn("&lt;script&gt;", html)
 
 
 if __name__ == "__main__":
