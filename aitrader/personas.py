@@ -3,6 +3,8 @@
 
 各ペルソナは異なる投資哲学を持ち、同じ相場データを別々の視点で判断する。
 weight は協議会での発言力(投票の重み)。
+action_weight を設定すると、そのペルソナがBUY/SELLを主張したときだけ
+weight の代わりに使われる(HOLD時は weight のまま)。
 """
 
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ class Persona:
     system_prompt: str
     provider: str = "claude"   # claude / openai / gemini (障害時は他へ自動切替)
     tier: str = "heavy"        # heavy(高性能) / light(軽量・低コスト)
+    action_weight: float = None  # BUY/SELL時のみ適用する重み(None=weightと同じ)
 
 
 _COMMON_RULES = """
@@ -41,6 +44,9 @@ PERSONAS = [
         key="risk_manager",
         name="慎重派リスク管理者・堅田",
         weight=1.0,
+        # 慎重派が「動いてよい」と言うのは強いシグナルなので、
+        # BUY/SELLを支持したときだけ発言力を上げる(HOLDは等倍のまま)
+        action_weight=1.5,
         provider="claude",
         tier="heavy",
         system_prompt=_COMMON_RULES + """

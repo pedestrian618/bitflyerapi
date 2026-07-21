@@ -59,6 +59,11 @@ tr:last-child td { border-bottom: none; }
 .pos { color: #4ade80; } .neg { color: #f87171; }
 .reason { white-space: normal; color: #cbd5e1; min-width: 220px; }
 .served { color: #64748b; font-size: 0.7rem; }
+details.cycle { background: #1e293b; border-radius: 10px; margin: 8px 0; }
+details.cycle summary { cursor: pointer; padding: 10px 14px; font-size: 0.85rem; }
+details.cycle[open] summary { border-bottom: 1px solid #0f172a; }
+details.cycle .inner { padding: 10px 12px 12px; }
+details.cycle .inner .meta { margin-bottom: 8px; }
 svg { width: 100%; height: auto; display: block; background: #1e293b; border-radius: 10px; }
 footer { color: #475569; font-size: 0.7rem; margin: 24px 0 8px; }
 """
@@ -189,26 +194,23 @@ def _price_chart(conn, product_code: str) -> str:
     return "\n".join(parts)
 
 
-def _latest_council(conn) -> str:
+def _council_cycle(conn, ts) -> tuple:
+    """council_logの1サイクル分を (協議会行, ペルソナ行リスト) で返す。"""
     rows = _query(conn, """
         SELECT actor, decision, confidence, weight, score, served_by, reasoning
-        FROM council_log WHERE ts = (SELECT MAX(ts) FROM council_log)
-    """)
-    if not rows:
-        return "<p class='meta'>協議会の記録はまだありません(次のサイクルから記録されます)。</p>"
-
-    names = {p.key: p.name for p in PERSONAS}
+        FROM council_log WHERE ts = ?
+    """, (ts,))
     council = next((r for r in rows if r[0] == COUNCIL_ACTOR), None)
     personas = sorted((r for r in rows if r[0] != COUNCIL_ACTOR),
                       key=lambda r: r[4], reverse=True)
+    return council, personas
 
-    parts = []
-    if council:
-        parts.append(f"<p style='margin-bottom:8px'>結論: {_vote_chip(council[1])} "
-                     f"<span class='meta'>{_esc(council[6])}</span></p>")
-    parts.append("<div class='scroll'><table><tr>"
-                 "<th>ペルソナ</th><th>判断</th><th>確信度</th><th>スコア</th>"
-                 "<th>応答モデル</th><th>判断根拠</th></tr>")
+
+def _persona_table(personas) -> str:
+    names = {p.key: p.name for p in PERSONAS}
+    parts = ["<div class='scroll'><table><tr>"
+             "<th>ペルソナ</th><th>判断</th><th>確信度</th><th>スコア</th>"
+             "<th>応答モデル</th><th>判断根拠</th></tr>"]
     for actor, decision, conf, weight, score, served_by, reasoning in personas:
         parts.append(
             f"<tr><td>{_esc(names.get(actor, actor))}</td>"
@@ -218,6 +220,58 @@ def _latest_council(conn) -> str:
             f"<td class='served'>{_esc(served_by)}</td>"
             f"<td class='reason'>{_esc(reasoning)}</td></tr>")
     parts.append("</table></div>")
+    return "\n".join(parts)
+
+
+def _latest_council(conn) -> str:
+    latest = _query(conn, "SELECT MAX(ts) FROM council_log")
+    ts = latest[0][0] if latest else None
+    if not ts:
+        return "<p class='meta'>協議会の記録はまだありません(次のサイクルから記録されます)。</p>"
+
+    council, personas = _council_cycle(conn, ts)
+    parts = []
+    if council:
+        parts.append(f"<p style='margin-bottom:8px'>結論: {_vote_chip(council[1])} "
+                     f"<span class='meta'>{_esc(council[6])}</span></p>")
+    parts.append(_persona_table(personas))
+    return "\n".join(parts)
+
+
+def _action_cycle_details(conn) -> str:
+    """直近HISTORY_CYCLESサイクルのうち、協議会がBUY/SELLに動いたサイクルの
+    協議会詳細(全ペルソナの判断根拠つき)を折りたたみで表示する。"""
+    recent = _query(conn, """
+        SELECT DISTINCT ts FROM paper_ledger ORDER BY ts DESC LIMIT ?
+    """, (HISTORY_CYCLES,))
+    if not recent:
+        return "<p class='meta'>判断履歴はまだありません。</p>"
+
+    placeholders = ",".join("?" * len(recent))
+    actions = _query(conn, f"""
+        SELECT ts, vote, executed, price, ltp FROM paper_ledger
+        WHERE actor = ? AND vote IN ('BUY', 'SELL') AND ts IN ({placeholders})
+        ORDER BY ts DESC
+    """, (COUNCIL_ACTOR, *[r[0] for r in recent]))
+    if not actions:
+        return (f"<p class='meta'>直近{HISTORY_CYCLES}サイクルの協議会の結論は"
+                "すべてHOLDでした(売買なし)。</p>")
+
+    parts = []
+    for ts, vote, executed, price, ltp in actions:
+        status = (f"約定 {price:,.0f} JPY" if executed
+                  else f"見送り(ポジション制約) ／ 当時値 {ltp:,.0f} JPY")
+        council, personas = _council_cycle(conn, ts)
+        summary = (f"{_esc(_jst(ts))} JST {_vote_chip(vote)} "
+                   f"<span class='meta'>{status}</span>")
+        inner = []
+        if council:
+            inner.append(f"<p class='meta'>{_esc(council[6])}</p>")
+        inner.append(_persona_table(personas)
+                     if personas else
+                     "<p class='meta'>このサイクルの協議会ログはありません。</p>")
+        parts.append(f"<details class='cycle'><summary>{summary}</summary>"
+                     f"<div class='inner'>{''.join(inner)}</div></details>")
     return "\n".join(parts)
 
 
@@ -374,6 +428,8 @@ def generate_html(conn, config: Config, now: datetime = None) -> str:
 {_latest_council(conn)}
 <h2>判断履歴(直近{HISTORY_CYCLES}サイクル)</h2>
 {_vote_history(conn)}
+<h2>売買が動いたサイクルの協議会詳細(直近{HISTORY_CYCLES}サイクル)</h2>
+{_action_cycle_details(conn)}
 <h2>仮想P&L(ペーパートレード)</h2>
 {_pnl_table(summary)}
 <footer>aitrader dashboard{f' ／ deploy: {_esc(version)}' if version else ''}</footer>

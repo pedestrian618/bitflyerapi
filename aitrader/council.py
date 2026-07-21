@@ -26,9 +26,17 @@ class VoteRecord:
     served_by: str = ""   # 実際に応答した "プロバイダ:モデル"
 
     @property
+    def effective_weight(self) -> float:
+        """BUY/SELL時は action_weight(あれば)、HOLD時は weight を使う。"""
+        if self.vote.decision in ("BUY", "SELL") and \
+                self.persona.action_weight is not None:
+            return self.persona.action_weight
+        return self.persona.weight
+
+    @property
     def score(self) -> float:
         conf = min(max(self.vote.confidence, 0.0), 1.0)
-        return self.persona.weight * conf
+        return self.effective_weight * conf
 
 
 @dataclass
@@ -47,7 +55,7 @@ class CouncilDecision:
             served = f" [{r.served_by}]" if r.served_by else ""
             lines.append(
                 f"[{r.persona.name}]{served} {r.vote.decision} "
-                f"(確信度 {r.vote.confidence:.2f} × 重み {r.persona.weight} = {r.score:.2f})\n"
+                f"(確信度 {r.vote.confidence:.2f} × 重み {r.effective_weight:g} = {r.score:.2f})\n"
                 f"  → {r.vote.reasoning}"
             )
         return "\n".join(lines)
