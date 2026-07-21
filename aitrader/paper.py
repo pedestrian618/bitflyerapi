@@ -87,7 +87,7 @@ class PaperBook:
                  d.score_ratio, float(d.agree_votes), 0.0, "",
                  f"スコア比 {d.score_ratio:.0%} / 賛成 {d.agree_votes}名")]
         rows += [(snapshot.timestamp, r.persona.key, r.vote.decision,
-                  r.vote.confidence, r.persona.weight, r.score,
+                  r.vote.confidence, r.effective_weight, r.score,
                   r.served_by, r.vote.reasoning)
                  for r in d.votes]
         self.conn.executemany("""

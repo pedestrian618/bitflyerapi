@@ -69,6 +69,15 @@ class TestAggregation(unittest.TestCase):
         d = _council()._aggregate(records)
         self.assertEqual(d.decision, "HOLD")
 
+    def test_action_weight_only_boosts_buy_sell(self):
+        # 堅田: HOLDは重み1.0のまま、BUY/SELLのときだけ1.5に増える
+        self.assertAlmostEqual(_record(0, "HOLD", 1.0).score, 1.0)
+        self.assertAlmostEqual(_record(0, "BUY", 1.0).score, 1.5)
+        self.assertAlmostEqual(_record(0, "SELL", 0.8).score, 1.2)
+        # action_weight未設定のペルソナは従来通り
+        self.assertAlmostEqual(_record(1, "BUY", 1.0).score, 1.0)
+        self.assertAlmostEqual(_record(1, "HOLD", 1.0).score, 1.0)
+
     def test_insufficient_agree_votes(self):
         # スコア比は高いが賛成2名のみ → HOLD
         records = [
@@ -425,6 +434,29 @@ class TestDashboard(unittest.TestCase):
             self.assertIn("協議会", html)                   # P&L・履歴
             # 秘密情報を含まないこと(万一キーが環境にあっても混入しない)
             self.assertNotIn("API_KEY", html)
+
+    def test_action_cycle_details_shown_for_trades(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            self._populate(config)  # 協議会BUYを1サイクル記録
+            html = open(write_dashboard(config), encoding="utf-8").read()
+            self.assertIn("売買が動いたサイクルの協議会詳細", html)
+            self.assertIn("<details class='cycle'>", html)
+            self.assertIn("約定", html)
+
+    def test_action_cycle_details_all_hold(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            book = PaperBook.from_config(config)
+            decision = _council_decision(
+                [(i, "HOLD", 0.5) for i in range(len(PERSONAS))])
+            book.record_cycle(_snapshot_for_paper(), decision)
+            html = generate_html(book.conn, config)
+            book.close()
+            self.assertIn("すべてHOLDでした", html)
+            self.assertNotIn("<details class='cycle'>", html)
 
     def test_write_dashboard_empty_db(self):
         import tempfile
