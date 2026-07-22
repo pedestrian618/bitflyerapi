@@ -136,8 +136,8 @@ python -m aitrader --dashboard
 | `AITRADER_CLAUDE_MODEL_LIGHT` | `claude-haiku-4-5` | Claude軽量級モデル |
 | `AITRADER_OPENAI_MODEL_HEAVY` | `gpt-5.6-luna` | ChatGPT重量級モデル |
 | `AITRADER_OPENAI_MODEL_LIGHT` | `gpt-5.6-luna` | ChatGPT軽量級モデル |
-| `AITRADER_GEMINI_MODEL_HEAVY` | `gemini-2.5-pro` | Gemini重量級モデル |
-| `AITRADER_GEMINI_MODEL_LIGHT` | `gemini-2.5-flash` | Gemini軽量級モデル |
+| `AITRADER_GEMINI_MODEL_HEAVY` | `gemini-pro-latest` | Gemini重量級モデル(フェイルオーバー先としてのみ使用) |
+| `AITRADER_GEMINI_MODEL_LIGHT` | `gemini-flash-latest` | Gemini軽量級モデル(大局が使用) |
 | `AITRADER_LLM_COOLDOWN_SEC` | `600` | 失敗プロバイダの回避時間(秒) |
 | `AITRADER_ORDER_SIZE` | `0.001` | 1回の注文量(銘柄の基軸通貨単位。旧名 `AITRADER_ORDER_SIZE_BTC` も可) |
 | `AITRADER_MAX_POSITION` | `0.01` | 最大保有量(同上。旧名 `AITRADER_MAX_POSITION_BTC` も可) |
