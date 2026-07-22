@@ -27,6 +27,7 @@ JST = timezone(timedelta(hours=9), name="JST")
 HISTORY_CYCLES = 24     # 判断履歴テーブルの行数
 CHART_HOURS = 48        # 価格チャートの期間
 CHART_MAX_POINTS = 480  # チャートのダウンサンプリング上限
+LONG_CHART_DAYS = 14    # 長期チャート(1時間足)の期間
 
 _VOTE_CLASS = {"BUY": "buy", "SELL": "sell", "HOLD": "hold"}
 
@@ -180,8 +181,39 @@ def _rolling_sma(values: list, window: int) -> list:
     return out
 
 
+def _hourly_closes(conn, product_code: str, days: int) -> list:
+    """長期チャート用の (時キー+':00', 終値)。古い順、直近N日分。"""
+    rows = _query(conn, """
+        SELECT minute, close FROM candles_1m
+        WHERE product_code = ? ORDER BY minute DESC LIMIT ?
+    """, (product_code, days * 24 * 60))
+    rows.reverse()
+    buckets = {}
+    for minute, close in rows:  # 昇順走査なので各hourの最後の分のcloseが残る
+        buckets[minute[:13] + ":00"] = close
+    return sorted(buckets.items())
+
+
 def _price_chart(conn, product_code: str) -> str:
     rows = _minute_closes(conn, product_code)
+    return _render_chart(conn, product_code, rows,
+                         trend_window_ratio=6, trend_label="8時間SMA")
+
+
+def _long_price_chart(conn, product_code: str) -> str:
+    """直近LONG_CHART_DAYS日の1時間足チャート。48時間分以下なら省略。"""
+    rows = _hourly_closes(conn, product_code, LONG_CHART_DAYS)
+    if len(rows) <= CHART_HOURS:
+        return ("<p class='meta'>長期チャートは48時間を超える蓄積ができてから"
+                "表示されます。</p>")
+    # 24時間SMA基準でトレンドを塗り分け(1時間足なので窓=24点)
+    return _render_chart(conn, product_code, rows,
+                         trend_window=24, trend_label="24時間SMA")
+
+
+def _render_chart(conn, product_code: str, rows: list,
+                  trend_window: int = None, trend_window_ratio: int = 6,
+                  trend_label: str = "8時間SMA") -> str:
     if len(rows) < 2:
         return "<p class='meta'>チャート表示に必要な価格データがまだありません。</p>"
 
@@ -235,9 +267,9 @@ def _price_chart(conn, product_code: str) -> str:
         parts.append(f'<text x="{pad_l - 6}" y="{gy + 4:.1f}" fill="#94a3b8" '
                      f'font-size="11" text-anchor="end">{_fmt_price(price)}</text>')
 
-    # 価格線 = トレンドで塗り分け(8時間SMAより上=緑 / 下=赤)。
+    # 価格線 = トレンドで塗り分け(SMAより上=緑 / 下=赤)。
     # 同色の連続区間ごとにpolylineを分け、境界点は両方に含めて線を繋ぐ
-    window = max(2, len(closes) // 6)  # 表示48時間に対して約8時間
+    window = trend_window or max(2, len(closes) // trend_window_ratio)
     sma = _rolling_sma(closes, window)
     up = [c >= s for c, s in zip(closes, sma)]
     seg_start = 0
@@ -276,7 +308,8 @@ def _price_chart(conn, product_code: str) -> str:
                      f'font-size="11" text-anchor="{anchor}">{label} JST</text>')
 
     parts.append("</svg>")
-    parts.append("<p class='meta'>線色: <span class='pos'>緑=上昇トレンド</span>(価格≥8時間SMA) / "
+    parts.append(f"<p class='meta'>線色: <span class='pos'>緑=上昇トレンド</span>"
+                 f"(価格≥{_esc(trend_label)}) / "
                  "<span class='neg'>赤=下落トレンド</span> ／ "
                  "背景帯: 協議会の空気感(緑=買い優勢 / 赤=売り優勢、濃さ=偏り) ／ "
                  "▲=仮想BUY / ▼=仮想SELL</p>")
@@ -552,6 +585,8 @@ def generate_html(conn, config: Config, now: datetime = None) -> str:
 {_summary_cards(conn, summary, config, now)}
 <h2>価格チャート(直近{CHART_HOURS}時間)</h2>
 {_price_chart(conn, config.product_code)}
+<h2>長期チャート(直近{LONG_CHART_DAYS}日・1時間足)</h2>
+{_long_price_chart(conn, config.product_code)}
 <h2>最新の協議会</h2>
 {_latest_council(conn, config.usdjpy_rate)}
 <h2>判断履歴(直近{HISTORY_CYCLES}サイクル)</h2>

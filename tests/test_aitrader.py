@@ -975,6 +975,37 @@ class TestDashboard(unittest.TestCase):
             self.assertIn('stroke="#f87171"', html)      # 下落トレンドの線
             self.assertIn("空気感", html)                # 凡例
 
+    def test_long_chart_appears_with_enough_history(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            store = HistoryStore(config.history_path)
+            candles = []  # 5日分(5分刻みの1分足)
+            for d in range(14, 19):
+                for h in range(24):
+                    for m in range(0, 60, 5):
+                        price = 10000000 + d * 50000 + h * 1000
+                        candles.append(Candle(
+                            time=f"2026-07-{d:02d}T{h:02d}:{m:02d}:00Z",
+                            open=price, high=price + 100, low=price - 100,
+                            close=price, volume=1.0))
+            store.upsert_candles(config.product_code, candles)
+            store.close()
+            book = PaperBook.from_config(config)
+            html = generate_html(book.conn, config)
+            book.close()
+            self.assertIn("長期チャート", html)
+            self.assertEqual(html.count("<svg"), 2)  # 48時間+長期の2枚
+            self.assertNotIn("蓄積ができてから", html)
+
+    def test_long_chart_hidden_without_history(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            self._populate(config)  # 2時間分しかない
+            html = open(write_dashboard(config), encoding="utf-8").read()
+            self.assertIn("蓄積ができてから", html)
+
     def test_write_dashboard_empty_db(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
