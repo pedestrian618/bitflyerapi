@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import Config
-from .paper import COUNCIL_ACTOR, PaperBook
+from .paper import COUNCIL_ACTOR, PaperBook, ensure_cost_columns
 from .personas import PERSONAS
 
 JST = timezone(timedelta(hours=9), name="JST")
@@ -219,7 +219,8 @@ def _price_chart(conn, product_code: str) -> str:
 def _council_cycle(conn, ts) -> tuple:
     """council_logの1サイクル分を (協議会行, ペルソナ行リスト) で返す。"""
     rows = _query(conn, """
-        SELECT actor, decision, confidence, weight, score, served_by, reasoning
+        SELECT actor, decision, confidence, weight, score, served_by, reasoning,
+               cost_usd
         FROM council_log WHERE ts = ?
     """, (ts,))
     council = next((r for r in rows if r[0] == COUNCIL_ACTOR), None)
@@ -228,24 +229,26 @@ def _council_cycle(conn, ts) -> tuple:
     return council, personas
 
 
-def _persona_table(personas) -> str:
+def _persona_table(personas, usdjpy_rate: float = 155.0) -> str:
     names = {p.key: p.name for p in PERSONAS}
     parts = ["<div class='scroll'><table><tr>"
              "<th>ペルソナ</th><th>判断</th><th>確信度</th><th>スコア</th>"
-             "<th>応答モデル</th><th>判断根拠</th></tr>"]
-    for actor, decision, conf, weight, score, served_by, reasoning in personas:
+             "<th>応答モデル</th><th>コスト</th><th>判断根拠</th></tr>"]
+    for actor, decision, conf, weight, score, served_by, reasoning, cost in personas:
+        cost_cell = f"¥{cost * usdjpy_rate:,.1f}" if cost else "—"
         parts.append(
             f"<tr><td>{_esc(names.get(actor, actor))}</td>"
             f"<td>{_vote_chip(decision)}</td>"
             f"<td class='num'>{conf:.2f} × {weight:g}</td>"
             f"<td class='num'>{score:.2f}</td>"
             f"<td class='served'>{_esc(served_by)}</td>"
+            f"<td class='num'>{cost_cell}</td>"
             f"<td class='reason'>{_esc(reasoning)}</td></tr>")
     parts.append("</table></div>")
     return "\n".join(parts)
 
 
-def _latest_council(conn) -> str:
+def _latest_council(conn, usdjpy_rate: float = 155.0) -> str:
     latest = _query(conn, "SELECT MAX(ts) FROM council_log")
     ts = latest[0][0] if latest else None
     if not ts:
@@ -256,11 +259,11 @@ def _latest_council(conn) -> str:
     if council:
         parts.append(f"<p style='margin-bottom:8px'>結論: {_vote_chip(council[1])} "
                      f"<span class='meta'>{_esc(council[6])}</span></p>")
-    parts.append(_persona_table(personas))
+    parts.append(_persona_table(personas, usdjpy_rate))
     return "\n".join(parts)
 
 
-def _action_cycle_details(conn) -> str:
+def _action_cycle_details(conn, usdjpy_rate: float = 155.0) -> str:
     """直近HISTORY_CYCLESサイクルのうち、協議会がBUY/SELLに動いたサイクルの
     協議会詳細(全ペルソナの判断根拠つき)を折りたたみで表示する。"""
     recent = _query(conn, """
@@ -289,7 +292,7 @@ def _action_cycle_details(conn) -> str:
         inner = []
         if council:
             inner.append(f"<p class='meta'>{_esc(council[6])}</p>")
-        inner.append(_persona_table(personas)
+        inner.append(_persona_table(personas, usdjpy_rate)
                      if personas else
                      "<p class='meta'>このサイクルの協議会ログはありません。</p>")
         parts.append(f"<details class='cycle'><summary>{summary}</summary>"
@@ -345,7 +348,30 @@ def _pnl_table(summary: dict, base_currency: str = "BTC") -> str:
     return "\n".join(parts)
 
 
-def _summary_cards(conn, summary: dict, config: Config) -> str:
+def _llm_cost_card(conn, config: Config, now: datetime):
+    """(ラベル, 値, サブ文言) を返す。コスト記録がなければ None。"""
+    rows = _query(conn, """
+        SELECT COALESCE(SUM(cost_usd), 0),
+               COUNT(DISTINCT CASE WHEN cost_usd IS NOT NULL THEN ts END)
+        FROM council_log
+    """)
+    if not rows or not rows[0][1]:
+        return None
+    total_usd, cycles = rows[0]
+    cutoff = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+    recent = _query(conn, """
+        SELECT COALESCE(SUM(cost_usd), 0) FROM council_log WHERE ts >= ?
+    """, (cutoff,))
+    recent_usd = recent[0][0] if recent else 0.0
+    rate = config.usdjpy_rate
+    sub = (f"直近24時間 ¥{recent_usd * rate:,.0f} ／ "
+           f"約¥{total_usd / cycles * rate:,.1f}/サイクル")
+    return ("LLMコスト(累計・概算)", f"¥{total_usd * rate:,.0f}", sub)
+
+
+def _summary_cards(conn, summary: dict, config: Config,
+                   now: datetime = None) -> str:
+    now = now or datetime.now(timezone.utc)
     cards = []
 
     last_ltp = summary.get("last_ltp")
@@ -377,6 +403,10 @@ def _summary_cards(conn, summary: dict, config: Config) -> str:
     hours = coverage[0][0] if coverage else 0
     cards.append(("履歴蓄積", f"約{hours}時間分",
                   f"判断 {summary['cycles']}サイクル" if summary["cycles"] else "サイクル記録なし"))
+
+    cost_card = _llm_cost_card(conn, config, now)
+    if cost_card:
+        cards.append(cost_card)
 
     return "<div class='cards'>" + "".join(
         f"<div class='card'><div class='label'>{_esc(label)}</div>"
@@ -414,6 +444,10 @@ def _deploy_version() -> str:
 def generate_html(conn, config: Config, now: datetime = None) -> str:
     """履歴DBの接続からダッシュボードHTML全体を組み立てる。"""
     now = now or datetime.now(timezone.utc)
+    try:
+        ensure_cost_columns(conn)  # 古いDBでもコスト列を参照できるようにする
+    except sqlite3.OperationalError:
+        pass  # 読み取り専用接続など。コスト欄は「—」表示になるだけ
     book = PaperBook.__new__(PaperBook)  # 既存接続を共有(closeしない)
     book.conn = conn
     try:
@@ -444,15 +478,15 @@ def generate_html(conn, config: Config, now: datetime = None) -> str:
 ページ生成: {_jst(now.isoformat(), '%Y/%m/%d %H:%M')} JST(5分ごとに自動再読込)</p>
 {_nav_tabs(config)}
 {_staleness_warning(summary, config, now)}
-{_summary_cards(conn, summary, config)}
+{_summary_cards(conn, summary, config, now)}
 <h2>価格チャート(直近{CHART_HOURS}時間)</h2>
 {_price_chart(conn, config.product_code)}
 <h2>最新の協議会</h2>
-{_latest_council(conn)}
+{_latest_council(conn, config.usdjpy_rate)}
 <h2>判断履歴(直近{HISTORY_CYCLES}サイクル)</h2>
 {_vote_history(conn)}
 <h2>売買が動いたサイクルの協議会詳細(直近{HISTORY_CYCLES}サイクル)</h2>
-{_action_cycle_details(conn)}
+{_action_cycle_details(conn, config.usdjpy_rate)}
 <h2>仮想P&L(ペーパートレード)</h2>
 {_pnl_table(summary, config.base_currency)}
 <footer>aitrader dashboard{f' ／ deploy: {_esc(version)}' if version else ''}</footer>

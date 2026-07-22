@@ -14,7 +14,7 @@ from aitrader.config import Config
 from aitrader.council import Council, PersonaVote, VoteRecord
 from aitrader.dashboard import generate_html, write_dashboard
 from aitrader.history import HistoryStore, HourCandle
-from aitrader.llm import LLMError, LLMRouter
+from aitrader.llm import LLMError, LLMRouter, estimate_cost_usd
 from aitrader.market import (Candle, MarketSnapshot, _adx, _atr, _bollinger,
                              _build_candles_1m, _ema, _macd, _rsi, _sma,
                              _taker_flow, _vwap)
@@ -138,8 +138,9 @@ class _FakeProvider:
         self.calls += 1
         if self.fail:
             raise RuntimeError(f"{self.name} down")
-        return PersonaVote(decision="BUY", confidence=0.7,
+        vote = PersonaVote(decision="BUY", confidence=0.7,
                            reasoning=f"{self.name}/{tier}")
+        return vote, (1000, 200)  # (トークンin, out)
 
 
 def _router(**providers) -> LLMRouter:
@@ -270,7 +271,7 @@ class TestLLMRouter(unittest.TestCase):
         r = _router(claude=_FakeProvider("claude"),
                     openai=_FakeProvider("openai"),
                     gemini=_FakeProvider("gemini"))
-        vote, served = r.ask("openai", "heavy", "sys", "user")
+        vote, served, usage = r.ask("openai", "heavy", "sys", "user")
         self.assertEqual(served, "openai:openai-heavy")
         self.assertEqual(vote.reasoning, "openai/heavy")
 
@@ -278,7 +279,7 @@ class TestLLMRouter(unittest.TestCase):
         r = _router(claude=_FakeProvider("claude"),
                     openai=_FakeProvider("openai", fail=True),
                     gemini=_FakeProvider("gemini"))
-        vote, served = r.ask("openai", "light", "sys", "user")
+        vote, served, usage = r.ask("openai", "light", "sys", "user")
         # openai失敗 → PROVIDER_ORDER順でclaudeへ、同じlightティア
         self.assertEqual(served, "claude:claude-light")
 
@@ -286,7 +287,7 @@ class TestLLMRouter(unittest.TestCase):
         r = _router(claude=_FakeProvider("claude", configured=False),
                     openai=_FakeProvider("openai", configured=False),
                     gemini=_FakeProvider("gemini"))
-        vote, served = r.ask("claude", "heavy", "sys", "user")
+        vote, served, usage = r.ask("claude", "heavy", "sys", "user")
         self.assertEqual(served, "gemini:gemini-heavy")
 
     def test_all_providers_fail_raises(self):
@@ -320,7 +321,7 @@ class TestLLMRouter(unittest.TestCase):
         r.ask("openai", "heavy", "s", "u")
         p.fail = False
         r._down_until["openai"] = 0.0  # クールダウン明けを再現
-        vote, served = r.ask("openai", "heavy", "s", "u")
+        vote, served, usage = r.ask("openai", "heavy", "s", "u")
         self.assertEqual(served, "openai:openai-heavy")
 
 
@@ -600,6 +601,95 @@ class TestMacro(unittest.TestCase):
         out = self._run_with_fake_get(fake_get)
         self.assertAlmostEqual(out["usdjpy"], 155.42)
         self.assertNotIn("usdjpy_change_pct", out)  # レベルのみ(変化率なし)
+
+
+class TestLLMCost(unittest.TestCase):
+    def test_estimate_cost_known_model(self):
+        # haiku: $1/M入力 + $5/M出力
+        self.assertAlmostEqual(
+            estimate_cost_usd("claude-haiku-4-5", 1_000_000, 1_000_000), 6.0)
+
+    def test_estimate_cost_prefix_match(self):
+        # 日付サフィックス付きのモデルIDも前方一致で照合される
+        self.assertAlmostEqual(
+            estimate_cost_usd("gpt-5-mini-2026-01-01", 1_000_000, 0), 0.25)
+
+    def test_estimate_cost_unknown_model_is_none(self):
+        self.assertIsNone(estimate_cost_usd("unknown-model", 1000, 1000))
+
+    def test_price_override_via_env(self):
+        os.environ["AITRADER_MODEL_PRICES"] = '{"gpt-5.1": [2.0, 20.0]}'
+        try:
+            self.assertAlmostEqual(estimate_cost_usd("gpt-5.1", 1_000_000, 0), 2.0)
+        finally:
+            del os.environ["AITRADER_MODEL_PRICES"]
+
+    def test_router_returns_usage(self):
+        r = _router(claude=_FakeProvider("claude"),
+                    openai=_FakeProvider("openai"),
+                    gemini=_FakeProvider("gemini"))
+        vote, served, usage = r.ask("claude", "heavy", "s", "u")
+        self.assertEqual(usage["tokens_in"], 1000)
+        self.assertEqual(usage["tokens_out"], 200)
+        self.assertIsNone(usage["cost_usd"])  # ダミーモデルは単価表にない
+
+    def _decision_with_usage(self, cost_per_persona=0.01):
+        records = [_record(i, "HOLD", 0.5) for i in range(len(PERSONAS))]
+        for r in records:
+            r.usage = {"tokens_in": 2000, "tokens_out": 300,
+                       "cost_usd": cost_per_persona}
+        return _council()._aggregate(records)
+
+    def test_record_cycle_stores_cost(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PaperBook(path=os.path.join(tmp, "t.db"))
+            book.record_cycle(_snapshot_for_paper(), self._decision_with_usage())
+            total = book.conn.execute(
+                "SELECT SUM(cost_usd) FROM council_log").fetchone()[0]
+            book.close()
+            self.assertAlmostEqual(total, 0.01 * len(PERSONAS))
+
+    def test_migration_adds_columns_to_old_db(self):
+        import sqlite3
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "old.db")
+            conn = sqlite3.connect(path)  # コスト列のない旧スキーマを作る
+            conn.execute("""
+                CREATE TABLE council_log (
+                    ts TEXT NOT NULL, actor TEXT NOT NULL,
+                    decision TEXT NOT NULL, confidence REAL NOT NULL,
+                    weight REAL NOT NULL, score REAL NOT NULL,
+                    served_by TEXT NOT NULL, reasoning TEXT NOT NULL,
+                    PRIMARY KEY (ts, actor))
+            """)
+            conn.execute("""INSERT INTO council_log VALUES
+                ('2026-07-01T00:00:00+00:00','council','HOLD',0,0,0,'','')""")
+            conn.commit()
+            conn.close()
+            book = PaperBook(path=path)  # 初期化時にALTERで列が足される
+            row = book.conn.execute(
+                "SELECT cost_usd FROM council_log").fetchone()
+            book.close()
+            self.assertIsNone(row[0])  # 旧行はNULL(コスト不明)扱い
+
+    def test_dashboard_cost_card_and_column(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config()
+            config.history_path = os.path.join(tmp, "h.db")
+            config.usdjpy_rate = 150.0
+            book = PaperBook.from_config(config)
+            book.record_cycle(_snapshot_for_paper(),
+                              self._decision_with_usage(0.01))
+            html = generate_html(book.conn, config)
+            book.close()
+            self.assertIn("LLMコスト(累計・概算)", html)
+            # 5ペルソナ × $0.01 × 150円 = ¥7.5 → 表示は四捨五入で ¥8
+            self.assertIn("¥8", html)
+            self.assertIn("<th>コスト</th>", html)  # ペルソナ表のコスト列
+            self.assertIn("¥1.5", html)  # $0.01 × 150 = ¥1.5/ペルソナ
 
 
 class TestCouncilState(unittest.TestCase):

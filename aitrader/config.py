@@ -91,6 +91,9 @@ class Config:
     min_agree_votes: int = field(default_factory=lambda: int(os.environ.get("AITRADER_MIN_AGREE_VOTES", "3")))
     min_score_ratio: float = field(default_factory=lambda: float(os.environ.get("AITRADER_MIN_SCORE_RATIO", "0.55")))
 
+    # LLMコストの円換算レート(表示用。厳密なレートである必要はない)
+    usdjpy_rate: float = field(default_factory=lambda: float(os.environ.get("AITRADER_USDJPY", "155")))
+
     def validate_for_trading(self):
         """実売買(dry_run=False)に必要な設定が揃っているか確認する。"""
         if self.dry_run:
