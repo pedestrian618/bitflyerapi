@@ -571,24 +571,29 @@ class TestMacro(unittest.TestCase):
         r.json = lambda: json_data
         return r
 
-    def test_yahoo_fallback_when_stooq_blocked(self):
+    def test_fred_and_frankfurter_with_change_pct(self):
         def fake_get(url, **kw):
             if "coingecko" in url:
                 return self._resp(json_data={"data": {
                     "market_cap_percentage": {"btc": 56.8},
                     "market_cap_change_percentage_24h_usd": 1.5}})
-            if "stooq" in url:
-                raise IOError("403")  # stooqはブロックされている想定
-            if "yahoo" in url:
-                return self._resp(json_data={"chart": {"result": [{"meta": {
-                    "regularMarketPrice": 20100.0,
-                    "chartPreviousClose": 20000.0}}]}})
+            if "fred" in url:
+                # 休場日の "." は読み飛ばされる
+                return self._resp(text="DATE,NASDAQCOM\n"
+                                       "2026-07-17,20000.0\n"
+                                       "2026-07-20,.\n"
+                                       "2026-07-21,20100.0\n")
+            if "frankfurter" in url:
+                return self._resp(json_data={"rates": {
+                    "2026-07-20": {"JPY": 154.0},
+                    "2026-07-21": {"JPY": 155.54}}})
             raise IOError("unexpected")
         out = self._run_with_fake_get(fake_get)
         self.assertAlmostEqual(out["btc_dominance"], 56.8)
         self.assertAlmostEqual(out["nasdaq"], 20100.0)
         self.assertAlmostEqual(out["nasdaq_change_pct"], 0.5)
-        self.assertAlmostEqual(out["usdjpy"], 20100.0)  # 同じyahooスタブが返る
+        self.assertAlmostEqual(out["usdjpy"], 155.54)
+        self.assertAlmostEqual(out["usdjpy_change_pct"], 1.0)
 
     def test_all_sources_down_returns_partial(self):
         def fake_get(url, **kw):
@@ -596,12 +601,17 @@ class TestMacro(unittest.TestCase):
         out = self._run_with_fake_get(fake_get)
         self.assertEqual(out, {})  # 空でも例外にならない
 
-    def test_frankfurter_last_resort_for_usdjpy(self):
+    def test_single_datapoint_gives_level_only(self):
         def fake_get(url, **kw):
+            if "fred" in url:
+                return self._resp(text="DATE,NASDAQCOM\n2026-07-21,20100.0\n")
             if "frankfurter" in url:
-                return self._resp(json_data={"rates": {"JPY": 155.42}})
+                return self._resp(json_data={"rates": {
+                    "2026-07-21": {"JPY": 155.42}}})
             raise IOError("403")
         out = self._run_with_fake_get(fake_get)
+        self.assertAlmostEqual(out["nasdaq"], 20100.0)
+        self.assertNotIn("nasdaq_change_pct", out)
         self.assertAlmostEqual(out["usdjpy"], 155.42)
         self.assertNotIn("usdjpy_change_pct", out)  # レベルのみ(変化率なし)
 
