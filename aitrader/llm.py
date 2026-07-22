@@ -69,7 +69,9 @@ class PersonaVote(BaseModel):
     """1ペルソナの投票(LLMの構造化出力)。"""
     decision: Decision = Field(description="BUY / SELL / HOLD のいずれか")
     confidence: float = Field(description="判断への確信度 (0.0〜1.0)")
-    reasoning: str = Field(description="判断根拠(日本語で2〜3文)")
+    expected_move_pct: float = Field(
+        0.0, description="今後24時間の期待騰落率(%、符号付き。例: +0.4, -0.8)")
+    reasoning: str = Field(description="判断根拠(日本語の箇条書き、体言止め)")
 
 
 class LLMError(RuntimeError):
@@ -82,9 +84,10 @@ _VOTE_JSON_SCHEMA = {
     "properties": {
         "decision": {"type": "string", "enum": ["BUY", "SELL", "HOLD"]},
         "confidence": {"type": "number"},
+        "expected_move_pct": {"type": "number"},
         "reasoning": {"type": "string"},
     },
-    "required": ["decision", "confidence", "reasoning"],
+    "required": ["decision", "confidence", "expected_move_pct", "reasoning"],
     "additionalProperties": False,
 }
 
