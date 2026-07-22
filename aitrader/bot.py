@@ -34,7 +34,14 @@ def run_once(config: Config, council: Council, trader: Trader,
                 snapshot.ltp, snapshot.rsi_14, snapshot.change_pct_15m,
                 snapshot.history_hours)
 
-    decision = council.convene(snapshot)
+    position = None
+    if paper is not None:
+        try:
+            position = paper.council_state()
+        except Exception:
+            logger.exception("ポジション取得に失敗(ポジション情報なしで協議します)")
+
+    decision = council.convene(snapshot, position=position)
     print(decision.summary())
 
     if paper is not None:

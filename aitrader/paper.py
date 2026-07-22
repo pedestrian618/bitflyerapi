@@ -137,6 +137,17 @@ class PaperBook:
 
     # --- 集計 ---
 
+    def council_state(self) -> dict:
+        """協議会の現在ポジション(ペルソナに渡す判断材料)。"""
+        position, avg_cost, _realized = self._last_state(COUNCIL_ACTOR)
+        cur = self.conn.execute("""
+            SELECT ts, vote, price FROM paper_ledger
+            WHERE actor = ? AND executed = 1 ORDER BY ts DESC LIMIT 1
+        """, (COUNCIL_ACTOR,))
+        row = cur.fetchone()
+        last = {"ts": row[0], "side": row[1], "price": row[2]} if row else None
+        return {"position": position, "avg_cost": avg_cost, "last_trade": last}
+
     def summary(self) -> dict:
         """期間情報とアクター別の仮想P&L集計(--report とダッシュボードで共用)。"""
         cur = self.conn.execute("""

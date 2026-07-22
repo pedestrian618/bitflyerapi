@@ -13,9 +13,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from aitrader.config import Config
 from aitrader.council import Council, PersonaVote, VoteRecord
 from aitrader.dashboard import generate_html, write_dashboard
-from aitrader.history import HistoryStore
+from aitrader.history import HistoryStore, HourCandle
 from aitrader.llm import LLMError, LLMRouter
-from aitrader.market import Candle, MarketSnapshot, _build_candles_1m, _rsi, _sma
+from aitrader.market import (Candle, MarketSnapshot, _adx, _atr, _bollinger,
+                             _build_candles_1m, _ema, _macd, _rsi, _sma,
+                             _taker_flow, _vwap)
+from aitrader.views import build_view_text
 from aitrader.paper import PaperBook
 from aitrader.personas import PERSONAS, PRODUCT_MARKER, product_label
 from aitrader.trader import Trader
@@ -147,6 +150,119 @@ def _router(**providers) -> LLMRouter:
     import threading
     r._lock = threading.Lock()
     return r
+
+
+def _hourly_candles(n=72, start=100.0, step=1.0):
+    return [
+        HourCandle(time=f"2026-07-{1 + i // 24:02d}T{i % 24:02d}",
+                   open=start + step * i - 0.5, high=start + step * i + 1.0,
+                   low=start + step * i - 1.0, close=start + step * i,
+                   volume=5.0, minutes=60)
+        for i in range(n)
+    ]
+
+
+class TestIndicatorsExtra(unittest.TestCase):
+    def test_ema_constant_series(self):
+        self.assertAlmostEqual(_ema([100.0] * 50, 8), 100.0)
+
+    def test_atr_reflects_range(self):
+        candles = _hourly_candles(20)  # 高値-安値=2, ギャップ含めTR=2〜3
+        atr = _atr(candles, 14)
+        self.assertGreater(atr, 1.9)
+        self.assertLess(atr, 3.1)
+
+    def test_adx_trend_vs_flat(self):
+        trending = _adx(_hourly_candles(40, step=2.0), 14)
+        flat = _adx(_hourly_candles(40, step=0.0), 14)
+        self.assertGreater(trending, 25.0)
+        self.assertLessEqual(flat, trending)
+
+    def test_macd_positive_in_uptrend(self):
+        macd, signal, hist = _macd([float(v) for v in range(100, 160)])
+        self.assertGreater(macd, 0.0)
+
+    def test_bollinger_constant_collapses(self):
+        mid, upper, lower = _bollinger([100.0] * 30, 20)
+        self.assertAlmostEqual(mid, 100.0)
+        self.assertAlmostEqual(upper, lower)
+
+    def test_vwap_weighted(self):
+        candles = [
+            Candle(time="t1", open=0, high=0, low=0, close=100.0, volume=1.0),
+            Candle(time="t2", open=0, high=0, low=0, close=200.0, volume=3.0),
+        ]
+        self.assertAlmostEqual(_vwap(candles), 175.0)
+
+    def test_taker_flow_window(self):
+        executions = [  # 新しい順
+            {"exec_date": "2026-07-22T10:14:30.123", "side": "BUY", "size": 0.5},
+            {"exec_date": "2026-07-22T10:10:00.0", "side": "SELL", "size": 0.2},
+            {"exec_date": "2026-07-22T09:50:00.0", "side": "BUY", "size": 9.9},  # 窓外
+        ]
+        buy, sell = _taker_flow(executions, minutes=15)
+        self.assertAlmostEqual(buy, 0.5)
+        self.assertAlmostEqual(sell, 0.2)
+
+
+class TestViews(unittest.TestCase):
+    def _snap(self):
+        s = _snapshot_for_paper()
+        s.candles_1h = _hourly_candles()
+        s.history_hours = 72
+        s.rsi_14h = 60.0
+        s.bid_depth, s.ask_depth = 3.0, 1.0
+        s.taker_buy_15m, s.taker_sell_15m = 2.0, 1.0
+        s.macro = {"btc_dominance": 55.0, "usdjpy": 155.0}
+        return s
+
+    def test_views_are_independent(self):
+        s = self._snap()
+        trend = build_view_text(s, "trend")
+        momentum = build_view_text(s, "momentum")
+        flow = build_view_text(s, "flow")
+        risk = build_view_text(s, "risk")
+        macro = build_view_text(s, "macro")
+        # 各ビューは専門指標を含み、他派の看板指標を含まない
+        self.assertIn("ADX", trend)
+        self.assertNotIn("RSI", trend)
+        self.assertIn("MACD", momentum)
+        self.assertIn("RSI", momentum)
+        self.assertNotIn("ADX", momentum)
+        self.assertIn("テイカーフロー", flow)
+        self.assertIn("板の厚み", flow)
+        self.assertNotIn("SMA(8時間)", flow)
+        self.assertIn("ATR", risk)
+        self.assertNotIn("RSI", risk)
+        self.assertIn("BTCドミナンス", macro)
+        self.assertNotIn("テイカー", macro)
+
+    def test_position_context(self):
+        s = self._snap()  # ltp=10,000,000
+        held = build_view_text(s, "risk", {
+            "position": 0.002, "avg_cost": 9800000.0,
+            "last_trade": {"ts": "2026-07-21T16:07", "side": "BUY",
+                           "price": 9800000.0}})
+        self.assertIn("保有: 0.0020", held)
+        self.assertIn("+2.04%", held)  # 含み益
+        self.assertIn("直近の約定: BUY", held)
+        flat = build_view_text(s, "risk", {"position": 0.0, "avg_cost": 0.0,
+                                           "last_trade": None})
+        self.assertIn("保有なし", flat)
+
+    def test_unknown_view_falls_back_to_full_summary(self):
+        s = self._snap()
+        self.assertEqual(build_view_text(s, ""), s.to_prompt_text())
+
+    def test_macro_view_reports_fetch_failure(self):
+        s = self._snap()
+        s.macro = {}
+        self.assertIn("取得できませんでした", build_view_text(s, "macro"))
+
+    def test_all_personas_have_views(self):
+        from aitrader.views import _VIEWS
+        for p in PERSONAS:
+            self.assertIn(p.view, _VIEWS, f"{p.name} のビューが未定義")
 
 
 class TestLLMRouter(unittest.TestCase):
@@ -432,6 +548,31 @@ class TestPaperCouncilLog(unittest.TestCase):
             self.assertEqual(council_row[1], "BUY")
             self.assertIn("賛成", council_row[2])
             book.close()
+
+
+class TestCouncilState(unittest.TestCase):
+    def test_council_state_after_buy(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PaperBook(path=os.path.join(tmp, "t.db"))
+            decision = _council_decision(
+                [(0, "BUY", 0.8), (1, "BUY", 0.9), (2, "BUY", 0.7),
+                 (3, "HOLD", 0.5), (4, "BUY", 0.6)])
+            book.record_cycle(_snapshot_for_paper(), decision)
+            state = book.council_state()
+            book.close()
+            self.assertAlmostEqual(state["position"], 0.001)
+            self.assertAlmostEqual(state["avg_cost"], 10001000.0)  # ask約定
+            self.assertEqual(state["last_trade"]["side"], "BUY")
+
+    def test_council_state_empty(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PaperBook(path=os.path.join(tmp, "t.db"))
+            state = book.council_state()
+            book.close()
+            self.assertEqual(state["position"], 0.0)
+            self.assertIsNone(state["last_trade"])
 
 
 class TestDashboard(unittest.TestCase):
