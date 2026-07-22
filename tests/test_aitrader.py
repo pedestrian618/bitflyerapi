@@ -550,6 +550,58 @@ class TestPaperCouncilLog(unittest.TestCase):
             book.close()
 
 
+class TestMacro(unittest.TestCase):
+    def _run_with_fake_get(self, fake_get):
+        from unittest.mock import patch
+        from aitrader import macro
+        with patch.object(macro.requests, "get", side_effect=fake_get):
+            return macro.fetch_macro()
+
+    @staticmethod
+    def _resp(json_data=None, text=""):
+        class Resp:
+            def raise_for_status(self):
+                pass
+        r = Resp()
+        r.text = text
+        r.json = lambda: json_data
+        return r
+
+    def test_yahoo_fallback_when_stooq_blocked(self):
+        def fake_get(url, **kw):
+            if "coingecko" in url:
+                return self._resp(json_data={"data": {
+                    "market_cap_percentage": {"btc": 56.8},
+                    "market_cap_change_percentage_24h_usd": 1.5}})
+            if "stooq" in url:
+                raise IOError("403")  # stooqはブロックされている想定
+            if "yahoo" in url:
+                return self._resp(json_data={"chart": {"result": [{"meta": {
+                    "regularMarketPrice": 20100.0,
+                    "chartPreviousClose": 20000.0}}]}})
+            raise IOError("unexpected")
+        out = self._run_with_fake_get(fake_get)
+        self.assertAlmostEqual(out["btc_dominance"], 56.8)
+        self.assertAlmostEqual(out["nasdaq"], 20100.0)
+        self.assertAlmostEqual(out["nasdaq_change_pct"], 0.5)
+        self.assertAlmostEqual(out["usdjpy"], 20100.0)  # 同じyahooスタブが返る
+
+    def test_all_sources_down_returns_partial(self):
+        def fake_get(url, **kw):
+            raise IOError("network down")
+        out = self._run_with_fake_get(fake_get)
+        self.assertEqual(out, {})  # 空でも例外にならない
+
+    def test_frankfurter_last_resort_for_usdjpy(self):
+        def fake_get(url, **kw):
+            if "frankfurter" in url:
+                return self._resp(json_data={"rates": {"JPY": 155.42}})
+            raise IOError("403")
+        out = self._run_with_fake_get(fake_get)
+        self.assertAlmostEqual(out["usdjpy"], 155.42)
+        self.assertNotIn("usdjpy_change_pct", out)  # レベルのみ(変化率なし)
+
+
 class TestCouncilState(unittest.TestCase):
     def test_council_state_after_buy(self):
         import tempfile
