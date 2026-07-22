@@ -938,6 +938,43 @@ class TestDashboard(unittest.TestCase):
             self.assertIn('class="active" href="./"', html)  # 自銘柄がハイライト
             self.assertIn("0.0000 ETH", html)  # P&L表の単位も基軸通貨
 
+    def test_chart_mood_bands_and_trend_colors(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            store = HistoryStore(config.history_path)
+            candles = []  # 前半上昇 → 後半下落の山型48時間
+            for i in range(48 * 60):
+                h, m = divmod(i, 60)
+                price = 10000000 + (i if i < 24 * 60 else 48 * 60 - i) * 200
+                candles.append(Candle(
+                    time=f"2026-07-{19 + h // 24:02d}T{h % 24:02d}:{m:02d}:00Z",
+                    open=price, high=price + 100, low=price - 100,
+                    close=price, volume=1.0))
+            store.upsert_candles(config.product_code, candles)
+            store.close()
+
+            book = PaperBook.from_config(config)
+            buy_heavy = _council_decision(
+                [(0, "BUY", 0.8), (1, "BUY", 0.9), (2, "HOLD", 0.4),
+                 (3, "BUY", 0.6), (4, "BUY", 0.7)])
+            sell_heavy = _council_decision(
+                [(0, "SELL", 0.8), (1, "SELL", 0.9), (2, "HOLD", 0.4),
+                 (3, "SELL", 0.6), (4, "HOLD", 0.5)])
+            book.record_cycle(_snapshot_for_paper(
+                ts="2026-07-19T06:00:00+00:00"), buy_heavy)
+            book.record_cycle(_snapshot_for_paper(
+                ts="2026-07-20T06:00:00+00:00"), sell_heavy)
+            html = generate_html(book.conn, config)
+            book.close()
+
+            self.assertIn('class="mood"', html)          # 空気感の背景帯
+            self.assertIn('fill="#22c55e"', html)        # 買い優勢の帯
+            self.assertIn('fill="#ef4444"', html)        # 売り優勢の帯
+            self.assertIn('stroke="#34d399"', html)      # 上昇トレンドの線
+            self.assertIn('stroke="#f87171"', html)      # 下落トレンドの線
+            self.assertIn("空気感", html)                # 凡例
+
     def test_write_dashboard_empty_db(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
