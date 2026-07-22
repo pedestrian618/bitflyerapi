@@ -131,8 +131,8 @@ python -m aitrader --dashboard
 | `AITRADER_PRODUCT_CODE` | `BTC_JPY` | 取引銘柄 |
 | `AITRADER_CLAUDE_MODEL_HEAVY` | `claude-opus-4-8` | Claude重量級モデル |
 | `AITRADER_CLAUDE_MODEL_LIGHT` | `claude-haiku-4-5` | Claude軽量級モデル |
-| `AITRADER_OPENAI_MODEL_HEAVY` | `gpt-5.1` | ChatGPT重量級モデル |
-| `AITRADER_OPENAI_MODEL_LIGHT` | `gpt-5-mini` | ChatGPT軽量級モデル |
+| `AITRADER_OPENAI_MODEL_HEAVY` | `gpt-5.6-luna` | ChatGPT重量級モデル |
+| `AITRADER_OPENAI_MODEL_LIGHT` | `gpt-5.6-luna` | ChatGPT軽量級モデル |
 | `AITRADER_GEMINI_MODEL_HEAVY` | `gemini-2.5-pro` | Gemini重量級モデル |
 | `AITRADER_GEMINI_MODEL_LIGHT` | `gemini-2.5-flash` | Gemini軽量級モデル |
 | `AITRADER_LLM_COOLDOWN_SEC` | `600` | 失敗プロバイダの回避時間(秒) |
