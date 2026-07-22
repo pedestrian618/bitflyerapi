@@ -61,9 +61,9 @@ def run_loop(config: Config = None):
     paper = PaperBook.from_config(config)
 
     mode = "ドライラン(実注文なし)" if config.dry_run else "実売買"
-    logger.info("AI協議会トレーダー起動 [%s] 銘柄=%s 間隔=%d秒 注文サイズ=%.4f BTC 履歴DB=%s",
+    logger.info("AI協議会トレーダー起動 [%s] 銘柄=%s 間隔=%d秒 注文サイズ=%.4f %s 履歴DB=%s",
                 mode, config.product_code, config.interval_sec,
-                config.order_size_btc, config.history_path)
+                config.order_size_btc, config.base_currency, config.history_path)
 
     try:
         while True:

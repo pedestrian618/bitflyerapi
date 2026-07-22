@@ -9,6 +9,23 @@ weight の代わりに使われる(HOLD時は weight のまま)。
 
 from dataclasses import dataclass
 
+# システムプロンプト内の銘柄プレースホルダ。Council が実行時に
+# 設定中の銘柄(product_code)の表示名へ置換する。
+PRODUCT_MARKER = "__PRODUCT__"
+
+PRODUCT_LABELS = {
+    "BTC_JPY": "ビットコイン(BTC/JPY)",
+    "ETH_JPY": "イーサリアム(ETH/JPY)",
+    "XRP_JPY": "XRP(XRP/JPY)",
+    "XLM_JPY": "ステラルーメン(XLM/JPY)",
+    "MONA_JPY": "モナコイン(MONA/JPY)",
+}
+
+
+def product_label(product_code: str) -> str:
+    """銘柄コードをプロンプト用の日本語表示名にする(未知の銘柄はコードのまま)。"""
+    return PRODUCT_LABELS.get(product_code, product_code.replace("_", "/"))
+
 
 @dataclass(frozen=True)
 class Persona:
@@ -22,7 +39,7 @@ class Persona:
 
 
 _COMMON_RULES = """
-あなたはビットコイン(BTC/JPY)のトレード判断を行うアナリストです。
+あなたは__PRODUCT__のトレード判断を行うアナリストです。
 与えられた相場データのみに基づいて判断してください。
 データには「短期(1分足・直近30分)」と「中期(1時間足・最大72時間)」の
 2つの時間軸があります。中期データが不完全な場合はその旨が明記されるので、

@@ -17,7 +17,7 @@ from aitrader.history import HistoryStore
 from aitrader.llm import LLMError, LLMRouter
 from aitrader.market import Candle, MarketSnapshot, _build_candles_1m, _rsi, _sma
 from aitrader.paper import PaperBook
-from aitrader.personas import PERSONAS
+from aitrader.personas import PERSONAS, PRODUCT_MARKER, product_label
 from aitrader.trader import Trader
 
 
@@ -206,6 +206,50 @@ class TestLLMRouter(unittest.TestCase):
         r._down_until["openai"] = 0.0  # クールダウン明けを再現
         vote, served = r.ask("openai", "heavy", "s", "u")
         self.assertEqual(served, "openai:openai-heavy")
+
+
+class TestMultiProduct(unittest.TestCase):
+    def test_common_rules_use_product_marker(self):
+        # 銘柄はハードコードせずマーカーで埋め込まれている
+        for p in PERSONAS:
+            self.assertIn(PRODUCT_MARKER, p.system_prompt)
+            self.assertNotIn("BTC/JPY", p.system_prompt)
+
+    def test_product_label(self):
+        self.assertEqual(product_label("BTC_JPY"), "ビットコイン(BTC/JPY)")
+        self.assertEqual(product_label("ETH_JPY"), "イーサリアム(ETH/JPY)")
+        self.assertEqual(product_label("DOGE_JPY"), "DOGE/JPY")  # 未知はコード
+
+    def test_council_substitutes_product(self):
+        c = Council.__new__(Council)
+        c.product_label = product_label("ETH_JPY")
+        prompt = c._system_prompt(PERSONAS[0])
+        self.assertIn("イーサリアム(ETH/JPY)", prompt)
+        self.assertNotIn(PRODUCT_MARKER, prompt)
+
+    def test_generic_order_size_env(self):
+        os.environ["AITRADER_ORDER_SIZE"] = "0.01"
+        os.environ["AITRADER_ORDER_SIZE_BTC"] = "0.005"
+        try:
+            self.assertAlmostEqual(Config().order_size_btc, 0.01)  # 新名が優先
+        finally:
+            del os.environ["AITRADER_ORDER_SIZE"]
+            self.assertAlmostEqual(Config().order_size_btc, 0.005)  # 旧名フォールバック
+            del os.environ["AITRADER_ORDER_SIZE_BTC"]
+
+    def test_base_currency(self):
+        config = Config()
+        config.product_code = "ETH_JPY"
+        self.assertEqual(config.base_currency, "ETH")
+
+    def test_prompt_text_uses_base_currency_and_decimals(self):
+        snap = _snapshot_for_paper(ltp=88.123)
+        snap.product_code = "XRP_JPY"
+        snap.best_bid, snap.best_ask, snap.spread = 88.10, 88.15, 0.05
+        text = snap.to_prompt_text()
+        self.assertIn("24時間出来高: 1000.00 XRP", text)
+        self.assertIn("88.123", text)   # 低単価は小数を残す
+        self.assertIn("0.050", text)    # スプレッドが「0」に潰れない
 
 
 class TestPersonaAssignments(unittest.TestCase):
@@ -457,6 +501,19 @@ class TestDashboard(unittest.TestCase):
             book.close()
             self.assertIn("すべてHOLDでした", html)
             self.assertNotIn("<details class='cycle'>", html)
+
+    def test_dashboard_product_tabs(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self._config(tmp)
+            config.product_code = "ETH_JPY"
+            config.dashboard_links = "BTC_JPY=../,ETH_JPY=./"
+            self._populate(config)
+            html = open(write_dashboard(config), encoding="utf-8").read()
+            self.assertIn('<nav class="tabs">', html)
+            self.assertIn('href="../"', html)
+            self.assertIn('class="active" href="./"', html)  # 自銘柄がハイライト
+            self.assertIn("0.0000 ETH", html)  # P&L表の単位も基軸通貨
 
     def test_write_dashboard_empty_db(self):
         import tempfile

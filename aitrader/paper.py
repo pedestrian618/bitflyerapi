@@ -26,10 +26,12 @@ _ACTOR_NAMES.update({p.key: p.name for p in PERSONAS})
 
 class PaperBook:
     def __init__(self, path: str = "aitrader_history.db",
-                 order_size: float = 0.001, max_position: float = 0.01):
+                 order_size: float = 0.001, max_position: float = 0.01,
+                 base_currency: str = "BTC"):
         self.conn = sqlite3.connect(path)
         self.order_size = order_size
         self.max_position = max_position
+        self.base_currency = base_currency
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_ledger (
                 ts TEXT NOT NULL,            -- スナップショット時刻(UTC)
@@ -64,7 +66,8 @@ class PaperBook:
     def from_config(cls, config: Config) -> "PaperBook":
         return cls(path=config.history_path,
                    order_size=config.order_size_btc,
-                   max_position=config.max_position_btc)
+                   max_position=config.max_position_btc,
+                   base_currency=config.base_currency)
 
     def close(self):
         self.conn.close()
@@ -179,13 +182,13 @@ class PaperBook:
 
         lines = [
             f"=== 仮想P&L台帳 {s['first_ts']} 〜 {s['last_ts']} ({s['cycles']}サイクル) ===",
-            f"BTC現物(参考): {s['first_ltp']:,.0f} → {s['last_ltp']:,.0f} JPY "
+            f"{self.base_currency}現物(参考): {s['first_ltp']:,.0f} → {s['last_ltp']:,.0f} JPY "
             f"({(s['last_ltp'] - s['first_ltp']) / s['first_ltp'] * 100:+.2f}%)",
         ]
         for a in s["actors"]:
             lines.append(
                 f"[{a['name']}] 約定 {a['trades']}回 "
-                f"(BUY {a['buys']}/SELL {a['sells']})  ポジ {a['position']:.4f} BTC  "
+                f"(BUY {a['buys']}/SELL {a['sells']})  ポジ {a['position']:.4f} {self.base_currency}  "
                 f"実現 {a['realized']:+,.0f}  評価 {a['unrealized']:+,.0f}  "
                 f"合計 {a['total']:+,.0f} JPY"
             )

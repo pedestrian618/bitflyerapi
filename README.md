@@ -124,15 +124,39 @@ python -m aitrader --dashboard
 | `AITRADER_GEMINI_MODEL_HEAVY` | `gemini-2.5-pro` | Gemini重量級モデル |
 | `AITRADER_GEMINI_MODEL_LIGHT` | `gemini-2.5-flash` | Gemini軽量級モデル |
 | `AITRADER_LLM_COOLDOWN_SEC` | `600` | 失敗プロバイダの回避時間(秒) |
-| `AITRADER_ORDER_SIZE_BTC` | `0.001` | 1回の注文量(BTC) |
-| `AITRADER_MAX_POSITION_BTC` | `0.01` | 最大保有量(BTC) |
+| `AITRADER_ORDER_SIZE` | `0.001` | 1回の注文量(銘柄の基軸通貨単位。旧名 `AITRADER_ORDER_SIZE_BTC` も可) |
+| `AITRADER_MAX_POSITION` | `0.01` | 最大保有量(同上。旧名 `AITRADER_MAX_POSITION_BTC` も可) |
 | `AITRADER_MIN_JPY_BALANCE` | `10000` | BUYに必要な最低JPY残高 |
 | `AITRADER_INTERVAL_SEC` | `3600` | 判定サイクル間隔(秒) |
 | `AITRADER_COOLDOWN_SEC` | `1800` | 連続発注を防ぐクールダウン(秒) |
 | `AITRADER_HISTORY_PATH` | `aitrader_history.db` | 1分足を蓄積するSQLiteのパス |
 | `AITRADER_DASHBOARD_PATH` | (空=無効) | ダッシュボードHTMLの出力先パス |
+| `AITRADER_DASHBOARD_LINKS` | (空=非表示) | 銘柄タブ(`BTC_JPY=./,ETH_JPY=./eth/` 形式。自銘柄がハイライト) |
 | `AITRADER_MIN_AGREE_VOTES` | `3` | 合意に必要な賛成人数 |
 | `AITRADER_MIN_SCORE_RATIO` | `0.55` | 合意に必要なスコア比 |
+
+### 複数銘柄の並走(マルチインスタンス)
+
+1銘柄 = 1インスタンスの構成で、コードは共通・環境変数だけで銘柄を切り替えます。
+ペルソナのプロンプトは銘柄名が自動で差し替わり(`BTC_JPY`→「ビットコイン(BTC/JPY)」等)、
+履歴DB・仮想P&L・ダッシュボードは銘柄ごとに独立します。
+
+```bash
+# 例: ETH_JPY をドライランで並走(BTCと成績比較する)
+AITRADER_PRODUCT_CODE=ETH_JPY \
+AITRADER_DRY_RUN=1 \
+AITRADER_HISTORY_PATH=aitrader_history_eth.db \
+AITRADER_ORDER_SIZE=0.01 \
+AITRADER_MAX_POSITION=0.1 \
+python -m aitrader --once
+```
+
+各インスタンスが自分のダッシュボードページを生成し、`AITRADER_DASHBOARD_LINKS` を
+設定するとページ上部に銘柄タブが出て相互に行き来できます。cron設定の実例は
+`deploy/cron.example` を参照してください。
+
+注文サイズはbitFlyerの最小注文量(BTC 0.001 / ETH 0.01 / XRP 0.1)以上に
+設定してください。板取引(Lightning現物)のある銘柄のみ対応です。
 
 ### 注意事項
 

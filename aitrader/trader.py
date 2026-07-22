@@ -23,8 +23,8 @@ class Trader:
     # --- 残高・ポジション ---
 
     def get_balances(self) -> dict:
-        """{"JPY": float, "BTC": float} を返す。APIキーが無ければ0扱い。"""
-        balances = {"JPY": 0.0, "BTC": 0.0}
+        """{"JPY": float, "<基軸通貨>": float} を返す。APIキーが無ければ0扱い。"""
+        balances = {"JPY": 0.0, self.config.base_currency: 0.0}
         if self.api is None:
             return balances
         for b in self.api.getbalance():
@@ -45,16 +45,17 @@ class Trader:
         if self.config.dry_run:
             return ""  # ドライランは常に通す(ログ目的)
 
+        base = self.config.base_currency
         balances = self.get_balances()
         if decision == "BUY":
             if balances["JPY"] < self.config.min_jpy_balance:
                 return f"JPY残高不足({balances['JPY']:.0f} < {self.config.min_jpy_balance:.0f})"
-            if balances["BTC"] + self.config.order_size_btc > self.config.max_position_btc:
-                return (f"最大ポジション超過(現在 {balances['BTC']:.4f} BTC, "
-                        f"上限 {self.config.max_position_btc:.4f} BTC)")
+            if balances[base] + self.config.order_size_btc > self.config.max_position_btc:
+                return (f"最大ポジション超過(現在 {balances[base]:.4f} {base}, "
+                        f"上限 {self.config.max_position_btc:.4f} {base})")
         elif decision == "SELL":
-            if balances["BTC"] < self.config.order_size_btc:
-                return f"BTC残高不足({balances['BTC']:.6f} < {self.config.order_size_btc:.6f})"
+            if balances[base] < self.config.order_size_btc:
+                return f"{base}残高不足({balances[base]:.6f} < {self.config.order_size_btc:.6f})"
         return ""
 
     # --- 執行 ---
@@ -73,8 +74,9 @@ class Trader:
             return {"executed": False, "reason": blocked, "order": None}
 
         if self.config.dry_run:
-            logger.info("[DRY RUN] %s %s %.6f BTC (成行) — 実注文は送信していません",
-                        self.config.product_code, decision, self.config.order_size_btc)
+            logger.info("[DRY RUN] %s %s %.6f %s (成行) — 実注文は送信していません",
+                        self.config.product_code, decision,
+                        self.config.order_size_btc, self.config.base_currency)
             self._last_trade_at = time.time()
             return {"executed": False,
                     "reason": "ドライランのため実注文なし",
@@ -89,9 +91,9 @@ class Trader:
         )
         if isinstance(result, dict) and "child_order_acceptance_id" in result:
             self._last_trade_at = time.time()
-            logger.info("発注成功: %s %s %.6f BTC (受付ID: %s)",
+            logger.info("発注成功: %s %s %.6f %s (受付ID: %s)",
                         self.config.product_code, decision,
-                        self.config.order_size_btc,
+                        self.config.order_size_btc, self.config.base_currency,
                         result["child_order_acceptance_id"])
             return {"executed": True, "reason": "発注成功", "order": result}
 

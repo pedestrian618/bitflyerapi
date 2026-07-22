@@ -13,6 +13,11 @@ from bitflyerapi import bitFlyerAPI
 from .history import HistoryStore
 
 
+def _px(v: float) -> str:
+    """プロンプト用の価格文字列。低単価銘柄(XRP等)は小数を残す。"""
+    return f"{v:.0f}" if abs(v) >= 1000 else f"{v:.3f}"
+
+
 @dataclass
 class Candle:
     time: str   # ISO8601(分単位)
@@ -55,19 +60,20 @@ class MarketSnapshot:
         """ペルソナに渡す相場サマリーのテキスト表現。"""
         recent = self.candles_1m[-30:]
         candle_lines = "\n".join(
-            f"{c.time}  O:{c.open:.0f} H:{c.high:.0f} L:{c.low:.0f} C:{c.close:.0f} V:{c.volume:.4f}"
+            f"{c.time}  O:{_px(c.open)} H:{_px(c.high)} L:{_px(c.low)} C:{_px(c.close)} V:{c.volume:.4f}"
             for c in recent
         )
+        base = self.product_code.split("_")[0]
 
         text = (
             f"銘柄: {self.product_code}\n"
             f"取得時刻(UTC): {self.timestamp}\n"
-            f"最終取引価格: {self.ltp:.0f} JPY\n"
-            f"買い気配: {self.best_bid:.0f} / 売り気配: {self.best_ask:.0f} (スプレッド: {self.spread:.0f})\n"
-            f"24時間出来高: {self.volume_24h:.2f} BTC\n"
+            f"最終取引価格: {_px(self.ltp)} JPY\n"
+            f"買い気配: {_px(self.best_bid)} / 売り気配: {_px(self.best_ask)} (スプレッド: {_px(self.spread)})\n"
+            f"24時間出来高: {self.volume_24h:.2f} {base}\n"
             f"板状態: {self.board_state} / ヘルス: {self.health}\n"
             f"\n## 短期(1分足ベース)\n"
-            f"短期SMA(10分): {self.sma_short:.0f} / 長期SMA(30分): {self.sma_long:.0f}\n"
+            f"短期SMA(10分): {_px(self.sma_short)} / 長期SMA(30分): {_px(self.sma_long)}\n"
             f"RSI(14, 1分足): {self.rsi_14:.1f}\n"
             f"騰落率: 15分 {self.change_pct_15m:+.2f}% / 60分 {self.change_pct_60m:+.2f}%\n"
             f"直近30分の1分足(古い順):\n{candle_lines}\n"
@@ -77,13 +83,13 @@ class MarketSnapshot:
         hourly = self.candles_1h or []
         if len(hourly) >= 2:
             hour_lines = "\n".join(
-                f"{c.time}:00Z  O:{c.open:.0f} H:{c.high:.0f} L:{c.low:.0f} C:{c.close:.0f} "
+                f"{c.time}:00Z  O:{_px(c.open)} H:{_px(c.high)} L:{_px(c.low)} C:{_px(c.close)} "
                 f"V:{c.volume:.3f} (データ{c.minutes}分)"
                 for c in hourly
             )
             text += (
                 f"蓄積データ: 約{self.history_hours}時間分\n"
-                f"SMA(8時間): {self.sma_8h:.0f} / SMA(24時間): {self.sma_24h:.0f}\n"
+                f"SMA(8時間): {_px(self.sma_8h)} / SMA(24時間): {_px(self.sma_24h)}\n"
                 f"RSI(14, 1時間足): {self.rsi_14h:.1f}\n"
                 f"24時間騰落率: {self.change_pct_24h:+.2f}%\n"
                 f"1時間足(古い順、最大72本):\n{hour_lines}\n"

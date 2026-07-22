@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from .config import Config
 from .llm import Decision, LLMRouter, PersonaVote
 from .market import MarketSnapshot
-from .personas import PERSONAS, Persona
+from .personas import PERSONAS, PRODUCT_MARKER, Persona, product_label
 
 logger = logging.getLogger(__name__)
 
@@ -69,17 +69,21 @@ class Council:
             cooldown_sec=self.config.llm_cooldown_sec,
         )
         self.personas = personas if personas is not None else PERSONAS
+        self.product_label = product_label(self.config.product_code)
         self.min_agree_votes = self.config.min_agree_votes
         self.min_score_ratio = self.config.min_score_ratio
 
         configured = self.router.configured_providers()
         logger.info("利用可能なLLMプロバイダ: %s", ", ".join(configured) or "なし")
 
+    def _system_prompt(self, persona: Persona) -> str:
+        return persona.system_prompt.replace(PRODUCT_MARKER, self.product_label)
+
     def _ask_persona(self, persona: Persona, market_text: str) -> VoteRecord:
         vote, served_by = self.router.ask(
             preferred=persona.provider,
             tier=persona.tier,
-            system=persona.system_prompt,
+            system=self._system_prompt(persona),
             user=(
                 "以下の相場データを分析し、あなたの投資哲学に基づいて"
                 "売買判断を出してください。\n\n" + market_text
