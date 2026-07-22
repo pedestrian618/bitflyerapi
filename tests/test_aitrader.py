@@ -337,12 +337,15 @@ class TestMultiProduct(unittest.TestCase):
         self.assertEqual(product_label("ETH_JPY"), "イーサリアム(ETH/JPY)")
         self.assertEqual(product_label("DOGE_JPY"), "DOGE/JPY")  # 未知はコード
 
-    def test_council_substitutes_product(self):
+    def test_council_substitutes_product_and_cost(self):
         c = Council.__new__(Council)
         c.product_label = product_label("ETH_JPY")
+        c.cost_label = "0.35"
         prompt = c._system_prompt(PERSONAS[0])
         self.assertIn("イーサリアム(ETH/JPY)", prompt)
+        self.assertIn("約0.35%", prompt)
         self.assertNotIn(PRODUCT_MARKER, prompt)
+        self.assertNotIn("__COST__", prompt)
 
     def test_generic_order_size_env(self):
         os.environ["AITRADER_ORDER_SIZE"] = "0.01"
@@ -690,6 +693,36 @@ class TestLLMCost(unittest.TestCase):
             self.assertIn("¥8", html)
             self.assertIn("<th>コスト</th>", html)  # ペルソナ表のコスト列
             self.assertIn("¥1.5", html)  # $0.01 × 150 = ¥1.5/ペルソナ
+
+
+class TestExpectedValue(unittest.TestCase):
+    def test_common_rules_include_expected_value_protocol(self):
+        for p in PERSONAS:
+            self.assertIn("expected_move_pct", p.system_prompt)
+            self.assertIn("__COST__", p.system_prompt)
+            self.assertIn("箇条書き", p.system_prompt)
+
+    def test_expected_pct_recorded_and_displayed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config()
+            config.history_path = os.path.join(tmp, "h.db")
+            records = [_record(i, "HOLD", 0.5) for i in range(len(PERSONAS))]
+            for r in records:
+                r.vote.expected_move_pct = 0.12
+                r.vote.reasoning = "・RSI 44で中立\n・期待値+0.12% < 往復コスト0.35% → HOLD"
+            decision = _council()._aggregate(records)
+            book = PaperBook.from_config(config)
+            book.record_cycle(_snapshot_for_paper(), decision)
+            stored = book.conn.execute("""
+                SELECT expected_pct FROM council_log WHERE actor != 'council'
+            """).fetchall()
+            html = generate_html(book.conn, config)
+            book.close()
+            self.assertTrue(all(abs(row[0] - 0.12) < 1e-9 for row in stored))
+            self.assertIn("<th>期待値</th>", html)
+            self.assertIn("+0.12%", html)
+            self.assertIn("<br>", html)  # 箇条書きの改行が<br>で表示される
 
 
 class TestCouncilState(unittest.TestCase):

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import Config
-from .paper import COUNCIL_ACTOR, PaperBook, ensure_cost_columns
+from .paper import COUNCIL_ACTOR, PaperBook, ensure_log_columns
 from .personas import PERSONAS
 
 JST = timezone(timedelta(hours=9), name="JST")
@@ -220,7 +220,7 @@ def _council_cycle(conn, ts) -> tuple:
     """council_logの1サイクル分を (協議会行, ペルソナ行リスト) で返す。"""
     rows = _query(conn, """
         SELECT actor, decision, confidence, weight, score, served_by, reasoning,
-               cost_usd
+               cost_usd, expected_pct
         FROM council_log WHERE ts = ?
     """, (ts,))
     council = next((r for r in rows if r[0] == COUNCIL_ACTOR), None)
@@ -232,18 +232,22 @@ def _council_cycle(conn, ts) -> tuple:
 def _persona_table(personas, usdjpy_rate: float = 155.0) -> str:
     names = {p.key: p.name for p in PERSONAS}
     parts = ["<div class='scroll'><table><tr>"
-             "<th>ペルソナ</th><th>判断</th><th>確信度</th><th>スコア</th>"
-             "<th>応答モデル</th><th>コスト</th><th>判断根拠</th></tr>"]
-    for actor, decision, conf, weight, score, served_by, reasoning, cost in personas:
+             "<th>ペルソナ</th><th>判断</th><th>期待値</th><th>確信度</th>"
+             "<th>スコア</th><th>応答モデル</th><th>コスト</th><th>判断根拠</th></tr>"]
+    for (actor, decision, conf, weight, score, served_by, reasoning,
+         cost, expected) in personas:
         cost_cell = f"¥{cost * usdjpy_rate:,.1f}" if cost else "—"
+        expected_cell = f"{expected:+.2f}%" if expected is not None else "—"
+        reason_html = _esc(reasoning).replace("\n", "<br>")
         parts.append(
             f"<tr><td>{_esc(names.get(actor, actor))}</td>"
             f"<td>{_vote_chip(decision)}</td>"
+            f"<td class='num'>{expected_cell}</td>"
             f"<td class='num'>{conf:.2f} × {weight:g}</td>"
             f"<td class='num'>{score:.2f}</td>"
             f"<td class='served'>{_esc(served_by)}</td>"
             f"<td class='num'>{cost_cell}</td>"
-            f"<td class='reason'>{_esc(reasoning)}</td></tr>")
+            f"<td class='reason'>{reason_html}</td></tr>")
     parts.append("</table></div>")
     return "\n".join(parts)
 
@@ -445,9 +449,9 @@ def generate_html(conn, config: Config, now: datetime = None) -> str:
     """履歴DBの接続からダッシュボードHTML全体を組み立てる。"""
     now = now or datetime.now(timezone.utc)
     try:
-        ensure_cost_columns(conn)  # 古いDBでもコスト列を参照できるようにする
+        ensure_log_columns(conn)  # 古いDBでも後付け列を参照できるようにする
     except sqlite3.OperationalError:
-        pass  # 読み取り専用接続など。コスト欄は「—」表示になるだけ
+        pass  # 読み取り専用接続など。該当欄は「—」表示になるだけ
     book = PaperBook.__new__(PaperBook)  # 既存接続を共有(closeしない)
     book.conn = conn
     try:

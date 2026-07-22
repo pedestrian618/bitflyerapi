@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from .config import Config
 from .llm import Decision, LLMRouter, PersonaVote
 from .market import MarketSnapshot
-from .personas import PERSONAS, PRODUCT_MARKER, Persona, product_label
+from .personas import (COST_MARKER, PERSONAS, PRODUCT_MARKER, Persona,
+                       product_label)
 from .views import build_view_text
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class Council:
         )
         self.personas = personas if personas is not None else PERSONAS
         self.product_label = product_label(self.config.product_code)
+        self.cost_label = f"{self.config.round_trip_cost_pct:g}"
         self.min_agree_votes = self.config.min_agree_votes
         self.min_score_ratio = self.config.min_score_ratio
 
@@ -79,7 +81,9 @@ class Council:
         logger.info("利用可能なLLMプロバイダ: %s", ", ".join(configured) or "なし")
 
     def _system_prompt(self, persona: Persona) -> str:
-        return persona.system_prompt.replace(PRODUCT_MARKER, self.product_label)
+        return (persona.system_prompt
+                .replace(PRODUCT_MARKER, self.product_label)
+                .replace(COST_MARKER, self.cost_label))
 
     def _ask_persona(self, persona: Persona, snapshot: MarketSnapshot,
                      position: dict = None) -> VoteRecord:

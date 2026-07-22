@@ -24,15 +24,20 @@ _ACTOR_NAMES = {COUNCIL_ACTOR: "協議会"}
 _ACTOR_NAMES.update({p.key: p.name for p in PERSONAS})
 
 
-def ensure_cost_columns(conn):
-    """council_log にLLMコスト列を追加する(既存DBへの後付けマイグレーション)。"""
+def ensure_log_columns(conn):
+    """council_log に後付け列を追加する(既存DBへのマイグレーション)。"""
     for column in ("tokens_in INTEGER NOT NULL DEFAULT 0",
                    "tokens_out INTEGER NOT NULL DEFAULT 0",
-                   "cost_usd REAL"):
+                   "cost_usd REAL",
+                   "expected_pct REAL"):
         try:
             conn.execute(f"ALTER TABLE council_log ADD COLUMN {column}")
         except sqlite3.OperationalError:
             pass  # 追加済み(またはテーブル未作成)
+
+
+# 旧名の互換エイリアス
+ensure_cost_columns = ensure_log_columns
 
 
 class PaperBook:
@@ -71,10 +76,11 @@ class PaperBook:
                 tokens_in INTEGER NOT NULL DEFAULT 0,   -- LLM入力トークン
                 tokens_out INTEGER NOT NULL DEFAULT 0,  -- LLM出力トークン
                 cost_usd REAL,               -- 見積コスト(USD、単価不明ならNULL)
+                expected_pct REAL,           -- ペルソナの期待騰落率(%、24時間)
                 PRIMARY KEY (ts, actor)
             )
         """)
-        ensure_cost_columns(self.conn)  # 既存DBに列を後付け
+        ensure_log_columns(self.conn)  # 既存DBに列を後付け
         self.conn.commit()
 
     @classmethod
@@ -104,18 +110,19 @@ class PaperBook:
         rows = [(snapshot.timestamp, COUNCIL_ACTOR, d.decision,
                  d.score_ratio, float(d.agree_votes), 0.0, "",
                  f"スコア比 {d.score_ratio:.0%} / 賛成 {d.agree_votes}名",
-                 0, 0, None)]
+                 0, 0, None, None)]
         rows += [(snapshot.timestamp, r.persona.key, r.vote.decision,
                   r.vote.confidence, r.effective_weight, r.score,
                   r.served_by, r.vote.reasoning,
                   r.usage.get("tokens_in", 0), r.usage.get("tokens_out", 0),
-                  r.usage.get("cost_usd"))
+                  r.usage.get("cost_usd"), r.vote.expected_move_pct)
                  for r in d.votes]
         self.conn.executemany("""
             INSERT OR REPLACE INTO council_log
                 (ts, actor, decision, confidence, weight, score,
-                 served_by, reasoning, tokens_in, tokens_out, cost_usd)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 served_by, reasoning, tokens_in, tokens_out, cost_usd,
+                 expected_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, rows)
 
     def _last_state(self, actor: str):

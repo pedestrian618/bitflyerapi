@@ -96,6 +96,11 @@ class Config:
     # LLMコストの円換算レート(表示用。厳密なレートである必要はない)
     usdjpy_rate: float = field(default_factory=lambda: float(os.environ.get("AITRADER_USDJPY", "155")))
 
+    # 売買の往復コスト(%)。ペルソナが期待騰落率と比較するHOLD閾値として
+    # プロンプトに埋め込まれる(取引所手数料0.15%×2 + スプレッド概算)
+    round_trip_cost_pct: float = field(default_factory=lambda: float(
+        os.environ.get("AITRADER_ROUND_TRIP_COST_PCT", "0.35")))
+
     def validate_for_trading(self):
         """実売買(dry_run=False)に必要な設定が揃っているか確認する。"""
         if self.dry_run:
