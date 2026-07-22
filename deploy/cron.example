@@ -1,21 +1,30 @@
 # ==========================================================================
-# aitrader マルチ銘柄運用の crontab 設定例 (XServer)
+# aitrader の crontab 設定例 (XServer)
 #
-# 1銘柄 = 1インスタンス(独立した履歴DB・独立したダッシュボードページ)。
-# コードは共通で、環境変数の上書きだけで銘柄を切り替える。
-# .env の値がベース(BTC実売買)になり、cron行のインライン環境変数が
-# それを上書きする(aitrader の _load_dotenv は設定済みの変数を上書きしない)。
+# 推奨構成: データ収集は毎時(LLMを呼ばない=無料)、協議会は3時間ごと。
+#   - 1時間足のBTC変動幅(0.2〜0.4%)は往復コスト(約0.35%)に見合わず、
+#     毎時協議してもほぼHOLDになる。3時間ごとなら判断が値幅に見合い、
+#     LLM費用も1/3になる
+#   - 1分足の蓄積・価格チャート・ダッシュボード更新は --collect が毎時行う
 #
-# 起動時刻は数分ずらす: LLM APIのレート制限と同時実行の負荷を避けるため。
+# 注意: 協議間隔を変えたら、サーバーの .env に
+#   AITRADER_INTERVAL_SEC=10800
+# を設定すること(ダッシュボードの「更新が止まっている」警告の判定基準)。
+#
+# 複数銘柄は 1銘柄=1インスタンス(独立した履歴DB・独立したダッシュボード)。
+# cron行のインライン環境変数が .env を上書きする。起動時刻は数分ずらして
+# LLMレート制限と負荷を避ける。
 # ==========================================================================
 
-# --- BTC_JPY: 実売買(既存。設定は .env の値をそのまま使う) ---
-7 * * * * cd $HOME/aitrader && .venv/bin/python -m aitrader --once >> logs/aitrader_btc.log 2>&1
+# --- BTC_JPY: 実売買(設定は .env の値をそのまま使う) ---
+7 * * * *    cd $HOME/aitrader && .venv/bin/python -m aitrader --collect >> logs/aitrader_btc.log 2>&1
+10 */3 * * * cd $HOME/aitrader && .venv/bin/python -m aitrader --once    >> logs/aitrader_btc.log 2>&1
 
 # --- ETH_JPY: ドライラン並走(仮想P&LでBTC協議会と成績比較する) ---
 # 注文サイズはbitFlyerの最小注文量(ETHは0.01)以上にすること。
 # ダッシュボードは btc の1階層下 eth/ に出力し、タブで相互リンクする。
-11 * * * * cd $HOME/aitrader && AITRADER_PRODUCT_CODE=ETH_JPY AITRADER_DRY_RUN=1 AITRADER_HISTORY_PATH=aitrader_history_eth.db AITRADER_ORDER_SIZE=0.01 AITRADER_MAX_POSITION=0.1 AITRADER_DASHBOARD_PATH=$HOME/example.com/public_html/aitrader-status/eth/index.html AITRADER_DASHBOARD_LINKS="BTC_JPY=../,ETH_JPY=./" .venv/bin/python -m aitrader --once >> logs/aitrader_eth.log 2>&1
+17 * * * *   cd $HOME/aitrader && AITRADER_PRODUCT_CODE=ETH_JPY AITRADER_DRY_RUN=1 AITRADER_HISTORY_PATH=aitrader_history_eth.db AITRADER_DASHBOARD_PATH=$HOME/example.com/public_html/aitrader-status/eth/index.html AITRADER_DASHBOARD_LINKS="BTC_JPY=../,ETH_JPY=./" .venv/bin/python -m aitrader --collect >> logs/aitrader_eth.log 2>&1
+20 */3 * * * cd $HOME/aitrader && AITRADER_PRODUCT_CODE=ETH_JPY AITRADER_DRY_RUN=1 AITRADER_HISTORY_PATH=aitrader_history_eth.db AITRADER_ORDER_SIZE=0.01 AITRADER_MAX_POSITION=0.1 AITRADER_DASHBOARD_PATH=$HOME/example.com/public_html/aitrader-status/eth/index.html AITRADER_DASHBOARD_LINKS="BTC_JPY=../,ETH_JPY=./" .venv/bin/python -m aitrader --once >> logs/aitrader_eth.log 2>&1
 
 # --- BTC側のダッシュボードにもタブを出す場合は .env に追記する ---
 #   AITRADER_DASHBOARD_LINKS=BTC_JPY=./,ETH_JPY=./eth/
@@ -24,5 +33,3 @@
 # - Basic認証(.htaccess)は aitrader-status/ に置いてあれば eth/ にも効く
 # - ETHを実売買に昇格するときは cron 行の AITRADER_DRY_RUN=1 を 0 にする
 #   (BITFLYER_API_KEY/SECRET は .env のものを共用)
-# - 銘柄を増やすときも同じパターンで1行追加する(XRP_JPYなら
-#   AITRADER_ORDER_SIZE=1 程度から。最小注文量に注意)

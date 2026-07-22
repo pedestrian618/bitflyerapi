@@ -90,9 +90,16 @@ export AITRADER_DRY_RUN=0
 ### 実行
 
 ```bash
-python -m aitrader --once   # 1サイクルだけ実行(動作確認向け)
-python -m aitrader          # ループ実行(デフォルト1時間間隔)
+python -m aitrader --once      # 1サイクルだけ実行(動作確認向け)
+python -m aitrader --collect   # 市況データの収集のみ(LLMなし・無料)
+python -m aitrader             # ループ実行(デフォルト1時間間隔)
 ```
+
+cron運用の推奨は「`--collect` を毎時 + `--once` を3時間ごと」です
+(`deploy/cron.example` 参照)。1時間足の変動幅は売買の往復コストに
+見合わないことが多く、3時間ごとの協議の方が判断が値幅に見合い、
+LLM費用も1/3になります。間隔を変えたら `AITRADER_INTERVAL_SEC` も
+合わせて設定してください(ダッシュボードの停止検知の基準になります)。
 
 **中期データについて**: bitFlyerの公開APIはローソク足を提供しないため、
 サイクルごとに取得した1分足を `aitrader_history.db`(SQLite)に蓄積し、
