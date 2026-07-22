@@ -10,6 +10,7 @@ Claude / OpenAI (ChatGPT) / Gemini の3プロバイダ × 軽量(light)/重量(h
   (サーキットブレーカー。成功すれば即復帰)
 """
 
+import json
 import logging
 import os
 import threading
@@ -21,6 +22,47 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 Decision = Literal["BUY", "SELL", "HOLD"]
+
+# モデル単価 (USD / 100万トークン、(入力, 出力))。
+# APIレスポンスに金額は含まれないため、usage(トークン数)×単価で自前計算する。
+# 各社の価格改定時はここを更新するか、環境変数で上書きする:
+#   AITRADER_MODEL_PRICES='{"gpt-5.1": [1.25, 10.0]}'
+# モデル名は前方一致で照合する(日付サフィックス付きIDに対応)。
+_DEFAULT_PRICES = {
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "gpt-5.6-sol": (5.0, 30.0),
+    "gpt-5.6-terra": (2.50, 15.0),
+    "gpt-5.6-luna": (1.0, 6.0),
+    "gpt-5.1": (1.25, 10.0),
+    "gpt-5-mini": (0.25, 2.0),
+    "gemini-pro-latest": (1.25, 10.0),
+    "gemini-flash-latest": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.0),
+    "gemini-2.5-flash": (0.30, 2.50),
+}
+
+
+def model_prices() -> dict:
+    prices = dict(_DEFAULT_PRICES)
+    raw = os.environ.get("AITRADER_MODEL_PRICES", "")
+    if raw:
+        try:
+            for model, pair in json.loads(raw).items():
+                prices[model] = (float(pair[0]), float(pair[1]))
+        except (ValueError, TypeError, IndexError):
+            logger.warning("AITRADER_MODEL_PRICES の解析に失敗(デフォルト単価を使用): %s", raw)
+    return prices
+
+
+def estimate_cost_usd(model: str, tokens_in: int, tokens_out: int):
+    """モデル単価表からコスト(USD)を見積もる。未知のモデルは None。"""
+    matches = [k for k in model_prices() if model.startswith(k)]
+    if not matches:
+        return None
+    price_in, price_out = model_prices()[max(matches, key=len)]
+    return (tokens_in * price_in + tokens_out * price_out) / 1_000_000.0
 
 
 class PersonaVote(BaseModel):
@@ -70,7 +112,11 @@ class _ClaudeProvider:
             messages=[{"role": "user", "content": user}],
             output_format=PersonaVote,
         )
-        return response.parsed_output
+        usage = getattr(response, "usage", None)
+        return response.parsed_output, (
+            int(getattr(usage, "input_tokens", 0) or 0),
+            int(getattr(usage, "output_tokens", 0) or 0),
+        )
 
 
 class _OpenAIProvider:
@@ -103,7 +149,12 @@ class _OpenAIProvider:
                 },
             },
         )
-        return PersonaVote.model_validate_json(response.choices[0].message.content)
+        vote = PersonaVote.model_validate_json(response.choices[0].message.content)
+        usage = getattr(response, "usage", None)
+        return vote, (
+            int(getattr(usage, "prompt_tokens", 0) or 0),
+            int(getattr(usage, "completion_tokens", 0) or 0),
+        )
 
 
 class _GeminiProvider:
@@ -134,10 +185,15 @@ class _GeminiProvider:
         )
         parsed = response.parsed
         if isinstance(parsed, PersonaVote):
-            return parsed
-        if parsed is not None:
-            return PersonaVote.model_validate(parsed)
-        return PersonaVote.model_validate_json(response.text)
+            vote = parsed
+        elif parsed is not None:
+            vote = PersonaVote.model_validate(parsed)
+        else:
+            vote = PersonaVote.model_validate_json(response.text)
+        um = getattr(response, "usage_metadata", None)
+        tokens_out = (int(getattr(um, "candidates_token_count", 0) or 0)
+                      + int(getattr(um, "thoughts_token_count", 0) or 0))
+        return vote, (int(getattr(um, "prompt_token_count", 0) or 0), tokens_out)
 
 
 PROVIDER_ORDER = ["claude", "openai", "gemini"]
@@ -182,7 +238,8 @@ class LLMRouter:
     def ask(self, preferred: str, tier: str, system: str, user: str):
         """preferred のプロバイダから順に試す。
 
-        戻り値: (PersonaVote, "プロバイダ名:モデル名")
+        戻り値: (PersonaVote, "プロバイダ名:モデル名", usage辞書)
+        usage辞書: {"tokens_in": int, "tokens_out": int, "cost_usd": float|None}
         """
         chain = [preferred] + [p for p in PROVIDER_ORDER if p != preferred]
         chain = [p for p in chain if self._providers[p].configured()]
@@ -200,11 +257,14 @@ class LLMRouter:
         for name in candidates:
             provider = self._providers[name]
             try:
-                vote = provider.ask(tier, system, user)
+                vote, (tokens_in, tokens_out) = provider.ask(tier, system, user)
                 self._mark_up(name)
                 if name != preferred:
                     logger.warning("フェイルオーバー: %s → %s で応答取得", preferred, name)
-                return vote, f"{name}:{provider.models[tier]}"
+                model = provider.models[tier]
+                usage = {"tokens_in": tokens_in, "tokens_out": tokens_out,
+                         "cost_usd": estimate_cost_usd(model, tokens_in, tokens_out)}
+                return vote, f"{name}:{model}", usage
             except Exception as e:
                 last_error = e
                 self._mark_down(name)

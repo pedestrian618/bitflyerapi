@@ -36,10 +36,12 @@ class Config:
         "AITRADER_CLAUDE_MODEL_HEAVY", os.environ.get("AITRADER_MODEL", "claude-sonnet-5")))
     claude_model_light: str = field(default_factory=lambda: os.environ.get(
         "AITRADER_CLAUDE_MODEL_LIGHT", "claude-haiku-4-5"))
+    # 2026-07時点の現行世代。luna は gpt-5.1 より新しく安い($1/$6 vs $1.25/$10)ため
+    # heavy/light とも luna をデフォルトにする(判断タスクには十分)
     openai_model_heavy: str = field(default_factory=lambda: os.environ.get(
-        "AITRADER_OPENAI_MODEL_HEAVY", "gpt-5.1"))
+        "AITRADER_OPENAI_MODEL_HEAVY", "gpt-5.6-luna"))
     openai_model_light: str = field(default_factory=lambda: os.environ.get(
-        "AITRADER_OPENAI_MODEL_LIGHT", "gpt-5-mini"))
+        "AITRADER_OPENAI_MODEL_LIGHT", "gpt-5.6-luna"))
     # Gemini は固定バージョンの廃止が早いため常に最新安定版を指すエイリアスを使う
     # (gemini-2.5-pro は 2026-07 時点で新規ユーザーに 404 を返す)
     gemini_model_heavy: str = field(default_factory=lambda: os.environ.get(
@@ -90,6 +92,9 @@ class Config:
     # 協議会の合意条件
     min_agree_votes: int = field(default_factory=lambda: int(os.environ.get("AITRADER_MIN_AGREE_VOTES", "3")))
     min_score_ratio: float = field(default_factory=lambda: float(os.environ.get("AITRADER_MIN_SCORE_RATIO", "0.55")))
+
+    # LLMコストの円換算レート(表示用。厳密なレートである必要はない)
+    usdjpy_rate: float = field(default_factory=lambda: float(os.environ.get("AITRADER_USDJPY", "155")))
 
     def validate_for_trading(self):
         """実売買(dry_run=False)に必要な設定が揃っているか確認する。"""

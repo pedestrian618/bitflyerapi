@@ -25,6 +25,7 @@ class VoteRecord:
     persona: Persona
     vote: PersonaVote
     served_by: str = ""   # 実際に応答した "プロバイダ:モデル"
+    usage: dict = field(default_factory=dict)  # tokens_in / tokens_out / cost_usd
 
     @property
     def effective_weight(self) -> float:
@@ -85,7 +86,7 @@ class Council:
         # ペルソナの専門分野に応じた情報源ビューを渡す(views.py参照)。
         # 全員が同じデータを見ると意見が相関するため、意図的に分けている。
         market_text = build_view_text(snapshot, persona.view, position)
-        vote, served_by = self.router.ask(
+        vote, served_by, usage = self.router.ask(
             preferred=persona.provider,
             tier=persona.tier,
             system=self._system_prompt(persona),
@@ -97,7 +98,8 @@ class Council:
         logger.info("[%s via %s] %s (confidence=%.2f): %s",
                     persona.name, served_by, vote.decision,
                     vote.confidence, vote.reasoning)
-        return VoteRecord(persona=persona, vote=vote, served_by=served_by)
+        return VoteRecord(persona=persona, vote=vote, served_by=served_by,
+                          usage=usage)
 
     def convene(self, snapshot: MarketSnapshot,
                 position: dict = None) -> CouncilDecision:
