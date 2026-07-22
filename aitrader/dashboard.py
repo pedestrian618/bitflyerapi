@@ -147,6 +147,39 @@ def _minute_closes(conn, product_code: str) -> list:
     return rows
 
 
+def _council_moods(conn) -> list:
+    """協議サイクルごとの空気感 [(分キー, ネットスコア -1〜+1), ...](古い順)。
+
+    ネットスコア = (BUY合計スコア - SELL合計スコア) / 総スコア。
+    +1に近いほど買い一色、-1に近いほど売り一色、0付近はHOLD優勢。
+    """
+    rows = _query(conn, """
+        SELECT ts, decision, score FROM council_log
+        WHERE actor != ? AND score > 0
+    """, (COUNCIL_ACTOR,))
+    by_ts = {}
+    for ts, decision, score in rows:
+        d = by_ts.setdefault(str(ts)[:16], {"buy": 0.0, "sell": 0.0, "total": 0.0})
+        d["total"] += score
+        if decision == "BUY":
+            d["buy"] += score
+        elif decision == "SELL":
+            d["sell"] += score
+    return sorted(
+        (minute, (d["buy"] - d["sell"]) / d["total"])
+        for minute, d in by_ts.items() if d["total"] > 0)
+
+
+def _rolling_sma(values: list, window: int) -> list:
+    out, acc = [], 0.0
+    for i, v in enumerate(values):
+        acc += v
+        if i >= window:
+            acc -= values[i - window]
+        out.append(acc / min(i + 1, window))
+    return out
+
+
 def _price_chart(conn, product_code: str) -> str:
     rows = _minute_closes(conn, product_code)
     if len(rows) < 2:
@@ -172,6 +205,27 @@ def _price_chart(conn, product_code: str) -> str:
     parts = [f'<svg viewBox="0 0 {width} {height}" role="img" '
              f'aria-label="{_esc(product_code)} 価格チャート">']
 
+    minutes = [minute for minute, _ in rows]
+
+    # 背景の縦帯 = 協議会の空気感(緑=買い優勢 / 赤=売り優勢、濃さ=偏り)
+    moods = [(m, net) for m, net in _council_moods(conn) if m <= minutes[-1]]
+    for idx, (minute, net) in enumerate(moods):
+        end_minute = moods[idx + 1][0] if idx + 1 < len(moods) else None
+        if end_minute is not None and end_minute < minutes[0]:
+            continue  # 帯全体がチャート左端より前
+        i0 = bisect.bisect_left(minutes, minute)
+        i1 = (bisect.bisect_left(minutes, end_minute)
+              if end_minute is not None else len(minutes) - 1)
+        i0, i1 = min(i0, len(minutes) - 1), min(i1, len(minutes) - 1)
+        if i1 <= i0 or abs(net) < 0.02:
+            continue
+        color = "#22c55e" if net > 0 else "#ef4444"
+        opacity = min(0.04 + 0.12 * abs(net), 0.16)
+        parts.append(
+            f'<rect class="mood" x="{x(i0):.1f}" y="{pad_t}" '
+            f'width="{x(i1) - x(i0):.1f}" height="{plot_h}" '
+            f'fill="{color}" opacity="{opacity:.3f}"/>')
+
     # 水平グリッドと価格ラベル
     for i in range(5):
         gy = pad_t + plot_h * i / 4
@@ -181,13 +235,23 @@ def _price_chart(conn, product_code: str) -> str:
         parts.append(f'<text x="{pad_l - 6}" y="{gy + 4:.1f}" fill="#94a3b8" '
                      f'font-size="11" text-anchor="end">{_fmt_price(price)}</text>')
 
-    points = " ".join(f"{x(i):.1f},{y(c):.1f}" for i, c in enumerate(closes))
-    parts.append(f'<polyline points="{points}" fill="none" '
-                 f'stroke="#38bdf8" stroke-width="1.6"/>')
+    # 価格線 = トレンドで塗り分け(8時間SMAより上=緑 / 下=赤)。
+    # 同色の連続区間ごとにpolylineを分け、境界点は両方に含めて線を繋ぐ
+    window = max(2, len(closes) // 6)  # 表示48時間に対して約8時間
+    sma = _rolling_sma(closes, window)
+    up = [c >= s for c, s in zip(closes, sma)]
+    seg_start = 0
+    for i in range(1, len(closes) + 1):
+        if i == len(closes) or up[i] != up[seg_start]:
+            seg = range(max(seg_start - 1, 0), i)  # 前区間と1点重ねて繋ぐ
+            points = " ".join(f"{x(j):.1f},{y(closes[j]):.1f}" for j in seg)
+            color = "#34d399" if up[seg_start] else "#f87171"
+            parts.append(f'<polyline points="{points}" fill="none" '
+                         f'stroke="{color}" stroke-width="1.6"/>')
+            seg_start = i
 
     # 協議会の仮想約定マーカー(BUY ▲ / SELL ▼)
     # ダウンサンプリングで分が間引かれているため最近傍の点に置く
-    minutes = [minute for minute, _ in rows]
     trades = _query(conn, """
         SELECT ts, vote, price FROM paper_ledger
         WHERE actor = ? AND executed = 1 ORDER BY ts
@@ -212,7 +276,10 @@ def _price_chart(conn, product_code: str) -> str:
                      f'font-size="11" text-anchor="{anchor}">{label} JST</text>')
 
     parts.append("</svg>")
-    parts.append("<p class='meta'>▲=協議会の仮想BUY / ▼=仮想SELL(ペーパートレード)</p>")
+    parts.append("<p class='meta'>線色: <span class='pos'>緑=上昇トレンド</span>(価格≥8時間SMA) / "
+                 "<span class='neg'>赤=下落トレンド</span> ／ "
+                 "背景帯: 協議会の空気感(緑=買い優勢 / 赤=売り優勢、濃さ=偏り) ／ "
+                 "▲=仮想BUY / ▼=仮想SELL</p>")
     return "\n".join(parts)
 
 
