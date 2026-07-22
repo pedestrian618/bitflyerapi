@@ -725,6 +725,103 @@ class TestExpectedValue(unittest.TestCase):
             self.assertIn("<br>", html)  # 箇条書きの改行が<br>で表示される
 
 
+class TestGuard(unittest.TestCase):
+    def _config(self):
+        config = Config()
+        config.stop_loss_pct = 2.0
+        config.emergency_move_pct = 3.0
+        config.emergency_cooldown_sec = 10800
+        return config
+
+    @staticmethod
+    def _conn():
+        import sqlite3
+        return sqlite3.connect(":memory:")
+
+    def test_stop_loss_triggers_below_threshold(self):
+        from aitrader import guard
+        snap = _snapshot_for_paper(ltp=9790000.0)  # 平均1000万に対し-2.1%
+        action, reason = guard.evaluate(
+            self._config(), snap,
+            {"position": 0.001, "avg_cost": 10000000.0}, self._conn())
+        self.assertEqual(action, guard.ACTION_STOP_LOSS)
+        self.assertIn("ルール損切り", reason)
+
+    def test_stop_loss_not_triggered_within_threshold(self):
+        from aitrader import guard
+        snap = _snapshot_for_paper(ltp=9850000.0)  # -1.5%
+        action, _ = guard.evaluate(
+            self._config(), snap,
+            {"position": 0.001, "avg_cost": 10000000.0}, self._conn())
+        self.assertEqual(action, guard.ACTION_NONE)
+
+    def test_abnormal_market_blocks_guard(self):
+        from aitrader import guard
+        snap = _snapshot_for_paper(ltp=9000000.0)  # -10%でも異常時は静観
+        snap.health = "SUPER BUSY"
+        action, reason = guard.evaluate(
+            self._config(), snap,
+            {"position": 0.001, "avg_cost": 10000000.0}, self._conn())
+        self.assertEqual(action, guard.ACTION_NONE)
+        self.assertIn("市場異常", reason)
+
+    def test_emergency_with_cooldown(self):
+        from aitrader import guard
+        config, conn = self._config(), self._conn()
+        snap = _snapshot_for_paper()
+        snap.change_pct_60m = -3.5
+        action1, _ = guard.evaluate(config, snap, {}, conn, now=1000.0)
+        action2, reason2 = guard.evaluate(config, snap, {}, conn, now=2000.0)
+        action3, _ = guard.evaluate(config, snap, {}, conn,
+                                    now=1000.0 + 10801)
+        self.assertEqual(action1, guard.ACTION_EMERGENCY)
+        self.assertEqual(action2, guard.ACTION_NONE)  # クールダウン中
+        self.assertIn("クールダウン", reason2)
+        self.assertEqual(action3, guard.ACTION_EMERGENCY)  # 経過後は再発動
+
+    def test_record_guard_exit_closes_position(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PaperBook(path=os.path.join(tmp, "t.db"))
+            decision = _council_decision(
+                [(0, "BUY", 0.8), (1, "BUY", 0.9), (2, "BUY", 0.7),
+                 (3, "HOLD", 0.5), (4, "BUY", 0.6)])
+            book.record_cycle(
+                _snapshot_for_paper(ts="2026-07-22T00:00:00+00:00"), decision)
+            snap = _snapshot_for_paper(ts="2026-07-22T01:00:00+00:00",
+                                       ltp=9800000.0)
+            sold = book.record_guard_exit(snap, "ルール損切り: テスト")
+            state = book.council_state()
+            log = book.conn.execute("""
+                SELECT decision, served_by, reasoning FROM council_log
+                WHERE ts = '2026-07-22T01:00:00+00:00'
+            """).fetchone()
+            book.close()
+            self.assertAlmostEqual(sold, 0.001)
+            self.assertAlmostEqual(state["position"], 0.0)  # 全量クローズ
+            self.assertEqual(state["last_trade"]["side"], "SELL")
+            self.assertEqual(log[0], "SELL")
+            self.assertEqual(log[1], "guard")
+            self.assertIn("ルール損切り", log[2])
+
+    def test_record_guard_exit_noop_when_flat(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PaperBook(path=os.path.join(tmp, "t.db"))
+            sold = book.record_guard_exit(_snapshot_for_paper(), "テスト")
+            book.close()
+            self.assertEqual(sold, 0.0)
+
+    def test_close_position_dry_run_sends_nothing(self):
+        config = Config()
+        config.dry_run = True
+        trader = Trader(config)
+        result = trader.close_position(0.001)
+        self.assertFalse(result["executed"])
+        self.assertIn("ドライラン", result["reason"])
+        self.assertEqual(trader.api, None)  # そもそもAPI未初期化
+
+
 class TestCouncilState(unittest.TestCase):
     def test_council_state_after_buy(self):
         import tempfile

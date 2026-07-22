@@ -4,6 +4,7 @@
 import logging
 import time
 
+from . import guard
 from .config import Config
 from .council import Council
 from .dashboard import write_dashboard
@@ -52,6 +53,47 @@ def run_once(config: Config, council: Council, trader: Trader,
 
     update_dashboard(config)
     return {"snapshot": snapshot, "decision": decision, "result": result}
+
+
+def run_collect(config: Config):
+    """毎時の収集+ガード。LLMは急変時の臨時協議会でのみ呼ばれる。
+
+    - 1分足を蓄積し、ダッシュボードを更新する(従来の --collect)
+    - ガード判定(guard.py): ルール損切り / 急変時の臨時協議会
+    """
+    store = HistoryStore(config.history_path)
+    paper = PaperBook.from_config(config)
+    try:
+        snapshot = fetch_market_snapshot(config.product_code, store=store,
+                                         include_macro=False)
+        logger.info("収集完了: 現在値 %.0f JPY / 1分足%d本 / 履歴 %d時間分",
+                    snapshot.ltp, len(snapshot.candles_1m),
+                    snapshot.history_hours)
+
+        try:
+            action, reason = guard.evaluate(
+                config, snapshot, paper.council_state(), paper.conn)
+        except Exception:
+            logger.exception("ガード判定に失敗(収集処理は継続します)")
+            action, reason = guard.ACTION_NONE, ""
+
+        if action == guard.ACTION_STOP_LOSS:
+            logger.warning("ガード発動: %s", reason)
+            size = paper.record_guard_exit(snapshot, reason)
+            result = Trader(config).close_position(size)
+            logger.warning("損切り執行: %s", result["reason"])
+        elif action == guard.ACTION_EMERGENCY:
+            logger.warning("ガード発動: %s → 臨時協議会を開催します", reason)
+            run_once(config, Council(config), Trader(config),
+                     store=store, paper=paper)
+            return  # run_once がダッシュボードまで更新済み
+        elif reason:
+            logger.info("ガード: %s", reason)
+    finally:
+        store.close()
+        paper.close()
+
+    update_dashboard(config)
 
 
 def run_loop(config: Config = None):

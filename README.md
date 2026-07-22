@@ -101,6 +101,19 @@ cron運用の推奨は「`--collect` を毎時 + `--once` を3時間ごと」で
 LLM費用も1/3になります。間隔を変えたら `AITRADER_INTERVAL_SEC` も
 合わせて設定してください(ダッシュボードの停止検知の基準になります)。
 
+### 毎時ガード(協議の谷間の安全弁)
+
+`--collect` は収集のついでにルールベースのガード(`aitrader/guard.py`)を
+実行します(LLMは呼ばない):
+
+1. **市場異常**(板ヘルスがNORMAL以外) → 何もしない(成行の事故防止)
+2. **ルール損切り**: 含み損が `AITRADER_STOP_LOSS_PCT`(既定2%)以下
+   → 協議会を通さず全量成行SELL。台帳・実注文の両方に反映され、
+   ダッシュボードに「ルール損切り」として記録される
+3. **急変検知**: |60分騰落率| が `AITRADER_EMERGENCY_MOVE_PCT`(既定3%)以上
+   → **臨時協議会**を即開催(急落が買い場か逃げ場かの方向判断はLLMに委ねる)。
+   `AITRADER_EMERGENCY_COOLDOWN_SEC`(既定3時間)のクールダウン付き
+
 **中期データについて**: bitFlyerの公開APIはローソク足を提供しないため、
 サイクルごとに取得した1分足を `aitrader_history.db`(SQLite)に蓄積し、
 そこから1時間足(最大72本)を構築してペルソナに渡します。
@@ -158,6 +171,9 @@ python -m aitrader --dashboard
 | `AITRADER_MIN_SCORE_RATIO` | `0.55` | 合意に必要なスコア比 |
 | `AITRADER_USDJPY` | `155` | LLMコスト表示の円換算レート |
 | `AITRADER_ROUND_TRIP_COST_PCT` | `0.35` | 売買往復コスト(%)。期待騰落率と比較するHOLD閾値としてプロンプトに埋め込まれる |
+| `AITRADER_STOP_LOSS_PCT` | `2.0` | ガードのルール損切りライン(含み損%) |
+| `AITRADER_EMERGENCY_MOVE_PCT` | `3.0` | 臨時協議会を招集する60分騰落率(%) |
+| `AITRADER_EMERGENCY_COOLDOWN_SEC` | `10800` | 臨時協議会のクールダウン(秒) |
 | `AITRADER_MODEL_PRICES` | (組込単価表) | モデル単価の上書き(`'{"gpt-5.1": [1.25, 10.0]}'` USD/100万トークン) |
 
 ### 複数銘柄の並走(マルチインスタンス)

@@ -101,6 +101,14 @@ class Config:
     round_trip_cost_pct: float = field(default_factory=lambda: float(
         os.environ.get("AITRADER_ROUND_TRIP_COST_PCT", "0.35")))
 
+    # 毎時ガード(guard.py): ルール損切りと急変時の臨時協議会
+    stop_loss_pct: float = field(default_factory=lambda: float(
+        os.environ.get("AITRADER_STOP_LOSS_PCT", "2.0")))
+    emergency_move_pct: float = field(default_factory=lambda: float(
+        os.environ.get("AITRADER_EMERGENCY_MOVE_PCT", "3.0")))
+    emergency_cooldown_sec: int = field(default_factory=lambda: int(
+        os.environ.get("AITRADER_EMERGENCY_COOLDOWN_SEC", "10800")))
+
     def validate_for_trading(self):
         """実売買(dry_run=False)に必要な設定が揃っているか確認する。"""
         if self.dry_run:
