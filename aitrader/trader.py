@@ -60,6 +60,42 @@ class Trader:
 
     # --- 執行 ---
 
+    def close_position(self, size: float) -> dict:
+        """ガード(ルール損切り)用の成行SELL。
+
+        緊急執行のためクールダウンは無視する。実残高を超える量は
+        自動的に切り詰める。
+        """
+        if size <= 0:
+            return {"executed": False, "reason": "売却数量なし", "order": None}
+        base = self.config.base_currency
+        if self.config.dry_run:
+            logger.info("[DRY RUN] %s 損切りSELL %.6f %s (成行) — 実注文は送信していません",
+                        self.config.product_code, size, base)
+            return {"executed": False,
+                    "reason": "ドライランのため実注文なし",
+                    "order": {"side": "SELL", "size": size, "dry_run": True}}
+
+        balances = self.get_balances()
+        size = min(size, balances[base])
+        if size <= 0:
+            return {"executed": False, "reason": f"{base}残高なし", "order": None}
+
+        result = self.api.sendchildorder(
+            product_code=self.config.product_code,
+            child_order_type="MARKET",
+            side="SELL",
+            size=size,
+        )
+        if isinstance(result, dict) and "child_order_acceptance_id" in result:
+            self._last_trade_at = time.time()
+            logger.info("損切り発注成功: %s SELL %.6f %s (受付ID: %s)",
+                        self.config.product_code, size, base,
+                        result["child_order_acceptance_id"])
+            return {"executed": True, "reason": "損切り発注成功", "order": result}
+        logger.error("損切り発注失敗: %s", result)
+        return {"executed": False, "reason": f"損切り発注失敗: {result}", "order": result}
+
     def execute(self, decision: str) -> dict:
         """協議会の結論に従って成行注文を出す。
 

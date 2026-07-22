@@ -14,12 +14,11 @@ import logging
 import os
 from pathlib import Path
 
-from .bot import run_loop, run_once, update_dashboard
+from .bot import run_collect, run_loop, run_once, update_dashboard
 from .config import Config
 from .council import Council
 from .dashboard import write_dashboard
 from .history import HistoryStore
-from .market import fetch_market_snapshot
 from .paper import PaperBook
 from .trader import Trader
 
@@ -51,7 +50,7 @@ def main():
     parser.add_argument("--once", action="store_true",
                         help="1サイクルだけ実行して終了する")
     parser.add_argument("--collect", action="store_true",
-                        help="市況データを履歴DBに蓄積するだけで終了する(LLM・売買なし)")
+                        help="市況データの蓄積+毎時ガード(ルール損切り/急変時のみ臨時協議会)")
     parser.add_argument("--report", action="store_true",
                         help="仮想P&L(協議会・ペルソナ別)を表示して終了する")
     parser.add_argument("--dashboard", action="store_true",
@@ -77,16 +76,8 @@ def main():
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
-        config = Config()
-        store = HistoryStore(config.history_path)
-        try:
-            snapshot = fetch_market_snapshot(config.product_code, store=store)
-            logging.getLogger("aitrader.collect").info(
-                "収集完了: 現在値 %.0f JPY / 1分足%d本 / 履歴 %d時間分",
-                snapshot.ltp, len(snapshot.candles_1m), snapshot.history_hours)
-        finally:
-            store.close()
-        update_dashboard(config)  # 収集のみでも価格チャートを最新化する
+        # 収集+毎時ガード(ルール損切り/急変時の臨時協議会)+ダッシュボード更新
+        run_collect(Config())
         return
 
     if args.once:

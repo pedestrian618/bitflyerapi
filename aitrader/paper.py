@@ -160,6 +160,35 @@ class PaperBook:
         """, (snapshot.timestamp, actor, vote, executed, price, size,
               snapshot.ltp, position, avg_cost, realized))
 
+    def record_guard_exit(self, snapshot, reason: str) -> float:
+        """ガード(ルール損切り)の全量SELLを協議会台帳に記録し、売却量を返す。
+
+        実注文とペーパー台帳の整合を保つため、実売買の有無にかかわらず
+        協議会のポジションをここでクローズする。council_log にも理由を
+        残し、ダッシュボードの売買詳細に表示されるようにする。
+        """
+        position, avg_cost, realized = self._last_state(COUNCIL_ACTOR)
+        if position <= 0:
+            return 0.0
+        price = snapshot.best_bid
+        realized += (price - avg_cost) * position
+        self.conn.execute("""
+            INSERT OR REPLACE INTO paper_ledger
+                (ts, actor, vote, executed, price, size, ltp,
+                 position, avg_cost, realized_pnl)
+            VALUES (?, ?, 'SELL', 1, ?, ?, ?, 0.0, 0.0, ?)
+        """, (snapshot.timestamp, COUNCIL_ACTOR, price, position,
+              snapshot.ltp, realized))
+        self.conn.execute("""
+            INSERT OR REPLACE INTO council_log
+                (ts, actor, decision, confidence, weight, score,
+                 served_by, reasoning, tokens_in, tokens_out, cost_usd,
+                 expected_pct)
+            VALUES (?, ?, 'SELL', 0.0, 0.0, 0.0, 'guard', ?, 0, 0, NULL, NULL)
+        """, (snapshot.timestamp, COUNCIL_ACTOR, reason))
+        self.conn.commit()
+        return position
+
     # --- 集計 ---
 
     def council_state(self) -> dict:
