@@ -34,7 +34,14 @@ def run_once(config: Config, council: Council, trader: Trader,
                 snapshot.ltp, snapshot.rsi_14, snapshot.change_pct_15m,
                 snapshot.history_hours)
 
-    decision = council.convene(snapshot)
+    position = None
+    if paper is not None:
+        try:
+            position = paper.council_state()
+        except Exception:
+            logger.exception("ポジション取得に失敗(ポジション情報なしで協議します)")
+
+    decision = council.convene(snapshot, position=position)
     print(decision.summary())
 
     if paper is not None:
@@ -61,9 +68,9 @@ def run_loop(config: Config = None):
     paper = PaperBook.from_config(config)
 
     mode = "ドライラン(実注文なし)" if config.dry_run else "実売買"
-    logger.info("AI協議会トレーダー起動 [%s] 銘柄=%s 間隔=%d秒 注文サイズ=%.4f BTC 履歴DB=%s",
+    logger.info("AI協議会トレーダー起動 [%s] 銘柄=%s 間隔=%d秒 注文サイズ=%.4f %s 履歴DB=%s",
                 mode, config.product_code, config.interval_sec,
-                config.order_size_btc, config.history_path)
+                config.order_size_btc, config.base_currency, config.history_path)
 
     try:
         while True:

@@ -37,6 +37,9 @@ body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, "Hiragin
 h1 { font-size: 1.2rem; margin-bottom: 4px; }
 h2 { font-size: 1rem; color: #94a3b8; margin: 24px 0 8px; }
 .meta { color: #64748b; font-size: 0.8rem; margin-bottom: 12px; }
+.tabs { display: flex; gap: 6px; margin: 10px 0; flex-wrap: wrap; }
+.tabs a { padding: 4px 14px; border-radius: 999px; background: #1e293b; color: #94a3b8; text-decoration: none; font-size: 0.8rem; font-weight: 600; }
+.tabs a.active { background: #0ea5e9; color: #0f172a; }
 .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; margin-right: 6px; }
 .badge.dry { background: #1e3a8a; color: #93c5fd; }
 .badge.live { background: #7f1d1d; color: #fca5a5; }
@@ -82,6 +85,25 @@ def _jst(ts: str, fmt: str = "%m/%d %H:%M") -> str:
 
 def _esc(text) -> str:
     return html.escape(str(text), quote=True)
+
+
+def _fmt_price(v: float) -> str:
+    """価格表示。低単価銘柄(XRP等)は小数第3位まで残す。"""
+    return f"{v:,.0f}" if abs(v) >= 1000 else f"{v:,.3f}"
+
+
+def _nav_tabs(config: Config) -> str:
+    """AITRADER_DASHBOARD_LINKS から銘柄タブを組み立てる(未設定なら空)。"""
+    items = []
+    for part in (config.dashboard_links or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        label, _, url = part.partition("=")
+        label, url = label.strip(), url.strip()
+        cls = ' class="active"' if label == config.product_code else ""
+        items.append(f'<a{cls} href="{_esc(url)}">{_esc(label)}</a>')
+    return f'<nav class="tabs">{"".join(items)}</nav>' if items else ""
 
 
 def _vote_chip(vote: str) -> str:
@@ -157,7 +179,7 @@ def _price_chart(conn, product_code: str) -> str:
         parts.append(f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{width - pad_r}" '
                      f'y2="{gy:.1f}" stroke="#334155" stroke-width="1"/>')
         parts.append(f'<text x="{pad_l - 6}" y="{gy + 4:.1f}" fill="#94a3b8" '
-                     f'font-size="11" text-anchor="end">{price:,.0f}</text>')
+                     f'font-size="11" text-anchor="end">{_fmt_price(price)}</text>')
 
     points = " ".join(f"{x(i):.1f},{y(c):.1f}" for i, c in enumerate(closes))
     parts.append(f'<polyline points="{points}" fill="none" '
@@ -259,8 +281,8 @@ def _action_cycle_details(conn) -> str:
 
     parts = []
     for ts, vote, executed, price, ltp in actions:
-        status = (f"約定 {price:,.0f} JPY" if executed
-                  else f"見送り(ポジション制約) ／ 当時値 {ltp:,.0f} JPY")
+        status = (f"約定 {_fmt_price(price)} JPY" if executed
+                  else f"見送り(ポジション制約) ／ 当時値 {_fmt_price(ltp)} JPY")
         council, personas = _council_cycle(conn, ts)
         summary = (f"{_esc(_jst(ts))} JST {_vote_chip(vote)} "
                    f"<span class='meta'>{status}</span>")
@@ -295,7 +317,7 @@ def _vote_history(conn) -> str:
              "".join(f"<th>{_esc(h)}</th>" for h in headers) + "</tr>"]
     for ts, votes in cycles.items():
         cells = [f"<td>{_esc(_jst(ts))}</td>",
-                 f"<td class='num'>{votes['ltp']:,.0f}</td>"]
+                 f"<td class='num'>{_fmt_price(votes['ltp'])}</td>"]
         cells += [f"<td>{_vote_chip(votes[k]) if k in votes else '<span class=meta>—</span>'}</td>"
                   for k in keys]
         parts.append("<tr>" + "".join(cells) + "</tr>")
@@ -303,18 +325,18 @@ def _vote_history(conn) -> str:
     return "\n".join(parts)
 
 
-def _pnl_table(summary: dict) -> str:
+def _pnl_table(summary: dict, base_currency: str = "BTC") -> str:
     if not summary["cycles"]:
         return "<p class='meta'>仮想P&Lの記録はまだありません。</p>"
     parts = ["<div class='scroll'><table><tr>"
              "<th>アクター</th><th>約定</th><th>ポジション</th><th>平均取得単価</th>"
              "<th>実現損益</th><th>評価損益</th><th>合計</th></tr>"]
     for a in summary["actors"]:
-        avg = f"{a['avg_cost']:,.0f}" if a["position"] > 0 else "—"
+        avg = _fmt_price(a["avg_cost"]) if a["position"] > 0 else "—"
         parts.append(
             f"<tr><td>{_esc(a['name'])}</td>"
             f"<td class='num'>{a['trades']}回 (B{a['buys']}/S{a['sells']})</td>"
-            f"<td class='num'>{a['position']:.4f} BTC</td>"
+            f"<td class='num'>{a['position']:.4f} {_esc(base_currency)}</td>"
             f"<td class='num'>{avg}</td>"
             f"<td class='num'>{_signed(a['realized'])}</td>"
             f"<td class='num'>{_signed(a['unrealized'])}</td>"
@@ -328,7 +350,7 @@ def _summary_cards(conn, summary: dict, config: Config) -> str:
 
     last_ltp = summary.get("last_ltp")
     if last_ltp:
-        cards.append(("現在値(最終サイクル)", f"{last_ltp:,.0f} JPY", ""))
+        cards.append(("現在値(最終サイクル)", f"{_fmt_price(last_ltp)} JPY", ""))
 
     # 24時間騰落(蓄積した1分足から)
     closes = _query(conn, """
@@ -413,13 +435,14 @@ def generate_html(conn, config: Config, now: datetime = None) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="300">
 <meta name="robots" content="noindex, nofollow">
-<title>aitrader ダッシュボード</title>
+<title>aitrader ダッシュボード — {_esc(config.product_code)}</title>
 <style>{_CSS}</style>
 </head>
 <body>
 <h1>aitrader — AI協議会トレーダー</h1>
 <p class="meta">{mode_badge} 銘柄: {_esc(config.product_code)} ／ {last_cycle} ／
 ページ生成: {_jst(now.isoformat(), '%Y/%m/%d %H:%M')} JST(5分ごとに自動再読込)</p>
+{_nav_tabs(config)}
 {_staleness_warning(summary, config, now)}
 {_summary_cards(conn, summary, config)}
 <h2>価格チャート(直近{CHART_HOURS}時間)</h2>
@@ -431,7 +454,7 @@ def generate_html(conn, config: Config, now: datetime = None) -> str:
 <h2>売買が動いたサイクルの協議会詳細(直近{HISTORY_CYCLES}サイクル)</h2>
 {_action_cycle_details(conn)}
 <h2>仮想P&L(ペーパートレード)</h2>
-{_pnl_table(summary)}
+{_pnl_table(summary, config.base_currency)}
 <footer>aitrader dashboard{f' ／ deploy: {_esc(version)}' if version else ''}</footer>
 </body>
 </html>

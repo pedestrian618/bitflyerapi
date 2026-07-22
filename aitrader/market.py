@@ -6,11 +6,16 @@
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from bitflyerapi import bitFlyerAPI
 
 from .history import HistoryStore
+
+
+def _px(v: float) -> str:
+    """プロンプト用の価格文字列。低単価銘柄(XRP等)は小数を残す。"""
+    return f"{v:.0f}" if abs(v) >= 1000 else f"{v:.3f}"
 
 
 @dataclass
@@ -51,23 +56,33 @@ class MarketSnapshot:
     change_pct_24h: float = 0.0
     history_hours: int = 0      # 蓄積済みデータのhour数(充足度)
 
+    # 板・約定フロー(板読みビュー用)
+    bid_depth: float = 0.0      # 中値-0.5%以内の買い板数量
+    ask_depth: float = 0.0      # 中値+0.5%以内の売り板数量
+    taker_buy_15m: float = 0.0  # 直近15分のテイカー買い数量
+    taker_sell_15m: float = 0.0  # 直近15分のテイカー売り数量
+
+    # 外部マクロ(マクロビュー用。取得失敗したキーは入らない)
+    macro: dict = None
+
     def to_prompt_text(self) -> str:
         """ペルソナに渡す相場サマリーのテキスト表現。"""
         recent = self.candles_1m[-30:]
         candle_lines = "\n".join(
-            f"{c.time}  O:{c.open:.0f} H:{c.high:.0f} L:{c.low:.0f} C:{c.close:.0f} V:{c.volume:.4f}"
+            f"{c.time}  O:{_px(c.open)} H:{_px(c.high)} L:{_px(c.low)} C:{_px(c.close)} V:{c.volume:.4f}"
             for c in recent
         )
+        base = self.product_code.split("_")[0]
 
         text = (
             f"銘柄: {self.product_code}\n"
             f"取得時刻(UTC): {self.timestamp}\n"
-            f"最終取引価格: {self.ltp:.0f} JPY\n"
-            f"買い気配: {self.best_bid:.0f} / 売り気配: {self.best_ask:.0f} (スプレッド: {self.spread:.0f})\n"
-            f"24時間出来高: {self.volume_24h:.2f} BTC\n"
+            f"最終取引価格: {_px(self.ltp)} JPY\n"
+            f"買い気配: {_px(self.best_bid)} / 売り気配: {_px(self.best_ask)} (スプレッド: {_px(self.spread)})\n"
+            f"24時間出来高: {self.volume_24h:.2f} {base}\n"
             f"板状態: {self.board_state} / ヘルス: {self.health}\n"
             f"\n## 短期(1分足ベース)\n"
-            f"短期SMA(10分): {self.sma_short:.0f} / 長期SMA(30分): {self.sma_long:.0f}\n"
+            f"短期SMA(10分): {_px(self.sma_short)} / 長期SMA(30分): {_px(self.sma_long)}\n"
             f"RSI(14, 1分足): {self.rsi_14:.1f}\n"
             f"騰落率: 15分 {self.change_pct_15m:+.2f}% / 60分 {self.change_pct_60m:+.2f}%\n"
             f"直近30分の1分足(古い順):\n{candle_lines}\n"
@@ -77,13 +92,13 @@ class MarketSnapshot:
         hourly = self.candles_1h or []
         if len(hourly) >= 2:
             hour_lines = "\n".join(
-                f"{c.time}:00Z  O:{c.open:.0f} H:{c.high:.0f} L:{c.low:.0f} C:{c.close:.0f} "
+                f"{c.time}:00Z  O:{_px(c.open)} H:{_px(c.high)} L:{_px(c.low)} C:{_px(c.close)} "
                 f"V:{c.volume:.3f} (データ{c.minutes}分)"
                 for c in hourly
             )
             text += (
                 f"蓄積データ: 約{self.history_hours}時間分\n"
-                f"SMA(8時間): {self.sma_8h:.0f} / SMA(24時間): {self.sma_24h:.0f}\n"
+                f"SMA(8時間): {_px(self.sma_8h)} / SMA(24時間): {_px(self.sma_24h)}\n"
                 f"RSI(14, 1時間足): {self.rsi_14h:.1f}\n"
                 f"24時間騰落率: {self.change_pct_24h:+.2f}%\n"
                 f"1時間足(古い順、最大72本):\n{hour_lines}\n"
@@ -133,6 +148,85 @@ def _sma(closes: list, n: int) -> float:
     return sum(window) / len(window)
 
 
+def _ema_series(values: list, n: int) -> list:
+    if not values:
+        return []
+    k = 2.0 / (n + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
+
+def _ema(closes: list, n: int) -> float:
+    series = _ema_series(closes, n)
+    return series[-1] if series else 0.0
+
+
+def _true_ranges(candles: list) -> list:
+    return [max(cur.high - cur.low,
+                abs(cur.high - prev.close),
+                abs(cur.low - prev.close))
+            for prev, cur in zip(candles[:-1], candles[1:])]
+
+
+def _atr(candles: list, n: int = 14) -> float:
+    """Average True Range。candlesは high/low/close を持つオブジェクト(古い順)。"""
+    trs = _true_ranges(candles)
+    if not trs:
+        return 0.0
+    window = trs[-n:]
+    return sum(window) / len(window)
+
+
+def _adx(candles: list, n: int = 14) -> float:
+    """簡易ADX(トレンドの強さ 0〜100)。25以上でトレンドが強いとされる。"""
+    if len(candles) < n + 1:
+        return 0.0
+    plus_dm, minus_dm = [], []
+    for prev, cur in zip(candles[:-1], candles[1:]):
+        up, down = cur.high - prev.high, prev.low - cur.low
+        plus_dm.append(up if up > down and up > 0 else 0.0)
+        minus_dm.append(down if down > up and down > 0 else 0.0)
+    trs = _true_ranges(candles)
+    dxs = []
+    for i in range(n - 1, len(trs)):
+        tr_sum = sum(trs[i - n + 1:i + 1]) or 1e-9
+        pdi = 100.0 * sum(plus_dm[i - n + 1:i + 1]) / tr_sum
+        mdi = 100.0 * sum(minus_dm[i - n + 1:i + 1]) / tr_sum
+        dxs.append(100.0 * abs(pdi - mdi) / ((pdi + mdi) or 1e-9))
+    window = dxs[-n:]
+    return sum(window) / len(window) if window else 0.0
+
+
+def _macd(closes: list, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:
+    """(MACD線, シグナル線, ヒストグラム) を返す。データ不足は(0,0,0)。"""
+    if len(closes) < slow + signal:
+        return (0.0, 0.0, 0.0)
+    macd_line = [f - s for f, s in zip(_ema_series(closes, fast),
+                                       _ema_series(closes, slow))]
+    signal_line = _ema_series(macd_line, signal)
+    return (macd_line[-1], signal_line[-1], macd_line[-1] - signal_line[-1])
+
+
+def _bollinger(closes: list, n: int = 20) -> tuple:
+    """(中心線, +2σ, -2σ) を返す。データ不足は(0,0,0)。"""
+    if len(closes) < n:
+        return (0.0, 0.0, 0.0)
+    window = closes[-n:]
+    mid = sum(window) / n
+    sd = (sum((c - mid) ** 2 for c in window) / n) ** 0.5
+    return (mid, mid + 2 * sd, mid - 2 * sd)
+
+
+def _vwap(candles: list) -> float:
+    """出来高加重平均価格(終値近似)。"""
+    total_v = sum(c.volume for c in candles)
+    if total_v <= 0:
+        return 0.0
+    return sum(c.close * c.volume for c in candles) / total_v
+
+
 def _rsi(closes: list, n: int = 14) -> float:
     if len(closes) < n + 1:
         return 50.0
@@ -158,8 +252,50 @@ def _change_pct(closes: list, periods: int) -> float:
     return (closes[-1] - base) / base * 100.0
 
 
+def _taker_flow(executions: list, minutes: int = 15) -> tuple:
+    """約定履歴(新しい順)から直近N分のテイカー(買い数量, 売り数量)を集計する。"""
+    if not executions:
+        return 0.0, 0.0
+    try:
+        ref = datetime.fromisoformat(executions[0]["exec_date"][:19])
+    except (ValueError, KeyError):
+        return 0.0, 0.0
+    cutoff = ref - timedelta(minutes=minutes)
+    buy = sell = 0.0
+    for ex in executions:
+        try:
+            t = datetime.fromisoformat(ex["exec_date"][:19])
+        except (ValueError, KeyError):
+            continue
+        if t < cutoff:
+            break  # 新しい順なのでここから先はすべて窓の外
+        size = float(ex.get("size", 0.0))
+        side = ex.get("side")
+        if side == "BUY":
+            buy += size
+        elif side == "SELL":
+            sell += size
+    return buy, sell
+
+
+def _board_depth(api, product_code: str, ltp: float, band_pct: float = 0.5) -> tuple:
+    """中値±band_pct%以内の板数量(買い, 売り)。取得失敗は(0, 0)。"""
+    try:
+        board = api.board(product_code=product_code)
+        mid = float(board.get("mid_price") or ltp)
+        band = mid * band_pct / 100.0
+        bid = sum(float(b["size"]) for b in board.get("bids", [])
+                  if float(b["price"]) >= mid - band)
+        ask = sum(float(a["size"]) for a in board.get("asks", [])
+                  if float(a["price"]) <= mid + band)
+        return bid, ask
+    except Exception:
+        return 0.0, 0.0
+
+
 def fetch_market_snapshot(product_code: str = "BTC_JPY",
-                          store: HistoryStore = None) -> MarketSnapshot:
+                          store: HistoryStore = None,
+                          include_macro: bool = True) -> MarketSnapshot:
     """相場スナップショットを構築する(認証不要)。
 
     store を渡すと、取得した1分足を蓄積し、蓄積済みデータから
@@ -181,6 +317,14 @@ def fetch_market_snapshot(product_code: str = "BTC_JPY",
     best_bid = float(ticker["best_bid"])
     best_ask = float(ticker["best_ask"])
 
+    bid_depth, ask_depth = _board_depth(api, product_code, ltp)
+    taker_buy, taker_sell = _taker_flow(executions)
+
+    macro = None
+    if include_macro:
+        from .macro import fetch_macro
+        macro = fetch_macro()
+
     snapshot = MarketSnapshot(
         product_code=product_code,
         timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -197,6 +341,11 @@ def fetch_market_snapshot(product_code: str = "BTC_JPY",
         rsi_14=_rsi(closes, 14),
         change_pct_15m=_change_pct(closes, 15),
         change_pct_60m=_change_pct(closes, 60),
+        bid_depth=bid_depth,
+        ask_depth=ask_depth,
+        taker_buy_15m=taker_buy,
+        taker_sell_15m=taker_sell,
+        macro=macro,
     )
 
     if store is not None:

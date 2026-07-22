@@ -57,9 +57,15 @@ class Config:
         }
 
     # 売買設定
+    # order_size_btc / max_position_btc の単位は「取引銘柄の基軸通貨」
+    # (BTC_JPYならBTC、ETH_JPYならETH)。フィールド名は互換のため据え置き。
+    # AITRADER_ORDER_SIZE / AITRADER_MAX_POSITION が優先され、
+    # 旧名の *_BTC はBTC専用時代との互換用フォールバック。
     dry_run: bool = field(default_factory=lambda: _env_bool("AITRADER_DRY_RUN", True))
-    order_size_btc: float = field(default_factory=lambda: float(os.environ.get("AITRADER_ORDER_SIZE_BTC", "0.001")))
-    max_position_btc: float = field(default_factory=lambda: float(os.environ.get("AITRADER_MAX_POSITION_BTC", "0.01")))
+    order_size_btc: float = field(default_factory=lambda: float(os.environ.get(
+        "AITRADER_ORDER_SIZE", os.environ.get("AITRADER_ORDER_SIZE_BTC", "0.001"))))
+    max_position_btc: float = field(default_factory=lambda: float(os.environ.get(
+        "AITRADER_MAX_POSITION", os.environ.get("AITRADER_MAX_POSITION_BTC", "0.01"))))
     min_jpy_balance: float = field(default_factory=lambda: float(os.environ.get("AITRADER_MIN_JPY_BALANCE", "10000")))
     interval_sec: int = field(default_factory=lambda: int(os.environ.get("AITRADER_INTERVAL_SEC", "3600")))
     trade_cooldown_sec: int = field(default_factory=lambda: int(os.environ.get("AITRADER_COOLDOWN_SEC", "1800")))
@@ -70,6 +76,16 @@ class Config:
     # ダッシュボード(静的HTML)の出力先。空なら生成しない。
     # public_html 配下を指定するとブラウザから稼働状況を確認できる
     dashboard_path: str = field(default_factory=lambda: os.environ.get("AITRADER_DASHBOARD_PATH", ""))
+
+    # 複数銘柄インスタンスのダッシュボードを相互リンクするタブ。
+    # 形式: "BTC_JPY=./,ETH_JPY=./eth/" (ラベル=URL をカンマ区切り。
+    # ラベルが自分の product_code と一致するタブがハイライトされる)
+    dashboard_links: str = field(default_factory=lambda: os.environ.get("AITRADER_DASHBOARD_LINKS", ""))
+
+    @property
+    def base_currency(self) -> str:
+        """取引銘柄の基軸通貨(BTC_JPY → BTC)。表示用。"""
+        return self.product_code.split("_")[0]
 
     # 協議会の合意条件
     min_agree_votes: int = field(default_factory=lambda: int(os.environ.get("AITRADER_MIN_AGREE_VOTES", "3")))

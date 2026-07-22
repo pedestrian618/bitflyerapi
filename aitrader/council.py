@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from .config import Config
 from .llm import Decision, LLMRouter, PersonaVote
 from .market import MarketSnapshot
-from .personas import PERSONAS, Persona
+from .personas import PERSONAS, PRODUCT_MARKER, Persona, product_label
+from .views import build_view_text
 
 logger = logging.getLogger(__name__)
 
@@ -69,17 +70,25 @@ class Council:
             cooldown_sec=self.config.llm_cooldown_sec,
         )
         self.personas = personas if personas is not None else PERSONAS
+        self.product_label = product_label(self.config.product_code)
         self.min_agree_votes = self.config.min_agree_votes
         self.min_score_ratio = self.config.min_score_ratio
 
         configured = self.router.configured_providers()
         logger.info("利用可能なLLMプロバイダ: %s", ", ".join(configured) or "なし")
 
-    def _ask_persona(self, persona: Persona, market_text: str) -> VoteRecord:
+    def _system_prompt(self, persona: Persona) -> str:
+        return persona.system_prompt.replace(PRODUCT_MARKER, self.product_label)
+
+    def _ask_persona(self, persona: Persona, snapshot: MarketSnapshot,
+                     position: dict = None) -> VoteRecord:
+        # ペルソナの専門分野に応じた情報源ビューを渡す(views.py参照)。
+        # 全員が同じデータを見ると意見が相関するため、意図的に分けている。
+        market_text = build_view_text(snapshot, persona.view, position)
         vote, served_by = self.router.ask(
             preferred=persona.provider,
             tier=persona.tier,
-            system=persona.system_prompt,
+            system=self._system_prompt(persona),
             user=(
                 "以下の相場データを分析し、あなたの投資哲学に基づいて"
                 "売買判断を出してください。\n\n" + market_text
@@ -90,13 +99,17 @@ class Council:
                     vote.confidence, vote.reasoning)
         return VoteRecord(persona=persona, vote=vote, served_by=served_by)
 
-    def convene(self, snapshot: MarketSnapshot) -> CouncilDecision:
-        """全ペルソナに並列で意見を聞き、重み付き投票で集約する。"""
-        market_text = snapshot.to_prompt_text()
+    def convene(self, snapshot: MarketSnapshot,
+                position: dict = None) -> CouncilDecision:
+        """全ペルソナに並列で意見を聞き、重み付き投票で集約する。
+
+        position は協議会の現在ポジション(PaperBook.council_state())。
+        渡すと各ペルソナが「利確のSELL」と「新規のSELL」を区別できる。
+        """
         records = []
         with ThreadPoolExecutor(max_workers=len(self.personas)) as pool:
             futures = {
-                pool.submit(self._ask_persona, p, market_text): p
+                pool.submit(self._ask_persona, p, snapshot, position): p
                 for p in self.personas
             }
             for future in as_completed(futures):
