@@ -5,17 +5,17 @@
 失敗したデータは辞書に入れない(呼び出し側は欠損を「取得失敗」と表示する)。
 外部依存の障害が売買サイクルを止めないよう、例外はすべて握りつぶす。
 
-データソースは複数持ち、上から順に試して最初に成功したものを使う:
-  NASDAQ:  stooq → Yahoo Finance
-  ドル円:   stooq → Yahoo Finance → frankfurter(ECB参照レート、レベルのみ)
+データソース:
+  NASDAQ:  FRED(セントルイス連銀の公開CSV。終値ベースで約1営業日遅れ)
+  ドル円:   frankfurter(ECB参照レート。1日1回更新、直近2営業日で変化率を出す)
   ドミナンス: CoinGecko
 
-stooq / Yahoo はbotのデフォルトUAを弾くことがあるため、ブラウザ相当の
-User-Agent を付ける。
+かつて使っていた stooq はエンドポイント消滅+bot対策で、Yahoo Finance は
+cookie なしアクセスへの 429 で、どちらも無認証では恒常的に使えなくなった。
 """
 
 import logging
-from urllib.parse import quote
+from datetime import date, timedelta
 
 import requests
 
@@ -29,47 +29,10 @@ _HEADERS = {
 }
 
 
-def _get(url: str, params: dict = None) -> requests.Response:
-    r = requests.get(url, params=params, timeout=_TIMEOUT, headers=_HEADERS)
+def _get(url: str, params: dict = None, headers: dict = _HEADERS) -> requests.Response:
+    r = requests.get(url, params=params, timeout=_TIMEOUT, headers=headers)
     r.raise_for_status()
     return r
-
-
-def _stooq_quote(symbol: str) -> tuple:
-    """stooqの無料CSVから(基準値=始値, 現在値)を取る。"""
-    r = _get("https://stooq.com/q/l/",
-             params={"s": symbol, "f": "sd2t2ohlcv", "h": "", "e": "csv"})
-    # 1行目ヘッダ: Symbol,Date,Time,Open,High,Low,Close,Volume
-    fields = r.text.strip().splitlines()[1].split(",")
-    return float(fields[3]), float(fields[6])
-
-
-def _yahoo_quote(symbol: str) -> tuple:
-    """Yahoo Financeのチャートエンドポイントから(前日終値, 現在値)を取る。"""
-    r = _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}",
-             params={"range": "2d", "interval": "1d"})
-    meta = r.json()["chart"]["result"][0]["meta"]
-    last = float(meta["regularMarketPrice"])
-    prev = float(meta.get("chartPreviousClose")
-                 or meta.get("previousClose") or 0.0)
-    return prev, last
-
-
-def _frankfurter_usdjpy() -> tuple:
-    """ECB参照レート(1日1回更新)。変化率は取れないので基準値0を返す。"""
-    r = _get("https://api.frankfurter.app/latest",
-             params={"from": "USD", "to": "JPY"})
-    return 0.0, float(r.json()["rates"]["JPY"])
-
-
-def _first_success(sources: list) -> tuple:
-    """(基準値, 現在値) を返す最初に成功したソースを使う。全滅ならNone。"""
-    for source in sources:
-        try:
-            return source()
-        except Exception:
-            continue
-    return None
 
 
 def _coingecko_global(out: dict):
@@ -82,30 +45,40 @@ def _coingecko_global(out: dict):
 
 
 def _fetch_nasdaq(out: dict):
-    quote_pair = _first_success([
-        lambda: _stooq_quote("^ndq"),
-        lambda: _yahoo_quote("^IXIC"),
-    ])
-    if quote_pair is None:
-        raise RuntimeError("全ソース失敗")
-    base, last = quote_pair
-    out["nasdaq"] = last
-    if base:
-        out["nasdaq_change_pct"] = (last - base) / base * 100.0
+    """FREDの公開CSVからNASDAQ総合の直近2営業日の終値を取る。
+
+    行形式は "YYYY-MM-DD,26206.890"。休場日は値が "." になるので読み飛ばす。
+    cosd(取得開始日)を絞らないと1971年からの全履歴が返ってくる。
+    FREDはブラウザ偽装UAをTLSフィンガープリント不一致で遮断するため、
+    素のUA(python-requests)で取得すること。
+    """
+    start = (date.today() - timedelta(days=14)).isoformat()
+    r = _get("https://fred.stlouisfed.org/graph/fredgraph.csv",
+             params={"id": "NASDAQCOM", "cosd": start}, headers=None)
+    closes = []
+    for line in r.text.strip().splitlines()[1:]:
+        _, _, value = line.partition(",")
+        if value and value != ".":
+            closes.append(float(value))
+    if not closes:
+        raise RuntimeError("有効な終値なし")
+    out["nasdaq"] = closes[-1]
+    if len(closes) >= 2 and closes[-2]:
+        out["nasdaq_change_pct"] = (closes[-1] - closes[-2]) / closes[-2] * 100.0
 
 
 def _fetch_usdjpy(out: dict):
-    quote_pair = _first_success([
-        lambda: _stooq_quote("usdjpy"),
-        lambda: _yahoo_quote("USDJPY=X"),
-        _frankfurter_usdjpy,
-    ])
-    if quote_pair is None:
-        raise RuntimeError("全ソース失敗")
-    base, last = quote_pair
-    out["usdjpy"] = last
-    if base:
-        out["usdjpy_change_pct"] = (last - base) / base * 100.0
+    """frankfurter(ECB参照レート)の時系列から直近2営業日のドル円を取る。"""
+    start = (date.today() - timedelta(days=14)).isoformat()
+    r = _get(f"https://api.frankfurter.dev/v1/{start}..",
+             params={"base": "USD", "symbols": "JPY"})
+    rates = r.json()["rates"]
+    values = [float(rates[day]["JPY"]) for day in sorted(rates)]
+    if not values:
+        raise RuntimeError("有効なレートなし")
+    out["usdjpy"] = values[-1]
+    if len(values) >= 2 and values[-2]:
+        out["usdjpy_change_pct"] = (values[-1] - values[-2]) / values[-2] * 100.0
 
 
 def fetch_macro() -> dict:
