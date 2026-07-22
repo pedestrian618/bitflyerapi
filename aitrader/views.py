@@ -217,10 +217,10 @@ def _macro_view(s: MarketSnapshot) -> str:
     if "crypto_mcap_change_24h" in m:
         text += f"暗号資産時価総額(24時間): {m['crypto_mcap_change_24h']:+.2f}%\n"
     if "nasdaq" in m:
-        chg = f" (日中 {m['nasdaq_change_pct']:+.2f}%)" if "nasdaq_change_pct" in m else ""
+        chg = f" (変化率 {m['nasdaq_change_pct']:+.2f}%)" if "nasdaq_change_pct" in m else ""
         text += f"NASDAQ総合: {m['nasdaq']:,.0f}{chg}\n"
     if "usdjpy" in m:
-        chg = f" (日中 {m['usdjpy_change_pct']:+.2f}%)" if "usdjpy_change_pct" in m else ""
+        chg = f" (変化率 {m['usdjpy_change_pct']:+.2f}%)" if "usdjpy_change_pct" in m else ""
         text += f"ドル円: {m['usdjpy']:.2f}{chg}\n"
     if not m:
         text += "外部データは取得できませんでした(bitFlyerのデータのみで判断してください)\n"
